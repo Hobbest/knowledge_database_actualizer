@@ -3,8 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
-
 from app import main as main_module
 from app.config import settings
 from app.note_output import (
@@ -15,6 +13,7 @@ from app.note_output import (
 from app.sources.base import LoadedSource
 from app.suggest import NoteSuggestion, _apply_analyze_in_place
 from app.vault_watcher import _VaultWatchHandler
+from fastapi.testclient import TestClient
 
 
 @pytest.fixture()

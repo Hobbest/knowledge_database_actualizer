@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from app.novelty import OverlappingNote
-from app.suggest import _build_frontmatter, _infer_note_tags, _related_links
 from app.sources.base import LoadedSource, SourceLocation
+from app.suggest import _build_frontmatter, _infer_note_tags, _related_links
 from app.wikilinks import format_wikilink, wikilink_target_from_path
 
 

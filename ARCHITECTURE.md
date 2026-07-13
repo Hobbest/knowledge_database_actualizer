@@ -1,8 +1,8 @@
 # Architecture Overview
 
 Knowledge Database Actualizer decides whether a knowledge source (YouTube video,
-PDF, text, or markdown) adds **new** information relative to an Obsidian-style
-markdown vault, and then drafts **atomic, checkable** notes for the concepts it
+web article, PDF, text, or markdown) adds **new** information relative to an
+Obsidian-style markdown vault, and then drafts **atomic, checkable** notes for the concepts it
 finds. This document describes the system as implemented today: core hardening
 (security, concurrency, batched similarity, checkpoints, CI) plus **Obsidian
 improvement Phases 1–4** (vault fidelity, workflow fit, editor integration, and
@@ -88,7 +88,7 @@ writes are safe-by-default; the vector index stays in sync after apply.
 | Embeddings | **sentence-transformers** *or* **google-genai** | Lazy load; batched queries; retries |
 | Vector store | **ChromaDB** (persistent) | Collection per provider+model; batched upsert |
 | Graph | **networkx** `DiGraph` | Path/stem/alias wikilink resolution |
-| Sources | `pypdf`, `pdfplumber`, `youtube-transcript-api` / `yt-dlp`, frontmatter | Tables/figures via pdfplumber; md tags/wikilinks |
+| Sources | `pypdf`, `pdfplumber`, `youtube-transcript-api` / `yt-dlp`, `trafilatura`, frontmatter | Tables/figures via pdfplumber; md tags/wikilinks; article extraction |
 | Frontmatter write | **PyYAML** `safe_dump` | No unsafe dump of user/LLM text |
 | LLM (optional) | OpenAI / Anthropic / Gemini / **Ollama** (`local` alias) | Off by default; per-run budget |
 | Tests / CI | **pytest** (102 tests) + GitHub Actions | Hermetic `tests/`; optional `scripts/smoke_test.py` |
@@ -119,6 +119,7 @@ app/
 │   ├── __init__.py           SourceDispatcher
 │   ├── pdf.py                PdfLoader (page segments + tables when enabled)
 │   ├── text.py               TextLoader (strips frontmatter; extracts wikilinks/tags)
+│   ├── web.py                WebArticleLoader (trafilatura main-content extraction)
 │   └── youtube.py            YouTubeLoader (canonical watch URL)
 ├── vault.py                  load_vault / load_note; tags, aliases, embeds; rich embedding text
 ├── chunking.py               Heading-aware overlapping chunks
@@ -232,7 +233,8 @@ timestamps). It survives segmentation and is written into YAML + a `## Source`
 section.
 
 Checkpoint resume identity uses `normalize_source_key()` so YouTube URL variants
-(`youtu.be/…` vs `watch?v=…`) match as `youtube:<video_id>`.
+(`youtu.be/…` vs `watch?v=…`) match as `youtube:<video_id>`, and web article
+URLs match as `web:<canonical url>` (fragments and tracking params dropped).
 
 Uploaded markdown sources preserve frontmatter-derived **tags** and **wikilinks**
 for overlap display and tag-aware similarity.

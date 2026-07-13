@@ -16,6 +16,7 @@ from app.similarity import adjusted_similarity
 from app.vault import VaultNote, embedding_text_for_note, load_note, load_vault
 from app.vault_fingerprints import index_config_changed, note_fingerprint
 from app.vault_index import resolve_vault_meta, vault_collection_token
+from app.wikilinks import WikilinkIndex, build_wikilink_index
 
 COLLECTION_NAME = "vault_chunks"
 

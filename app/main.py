@@ -25,9 +25,9 @@ from app.config import settings
 from app.embeddings import chunk_size_error
 from app.graph import KnowledgeGraph
 from app.index_meta import collect_index_warnings, load_index_meta, stale_note_count
-from app.obsidian_uri import obsidian_open_uri, obsidian_uri_available
 from app.note_output import normalize_vault_relative_path
 from app.novelty import NoveltyResult, analyze_novelty
+from app.obsidian_uri import obsidian_open_uri, obsidian_uri_available
 from app.runtime import ANALYZE_POOL, INDEX_LOCK, WORKER_POOL
 from app.sources import SourceDispatcher
 from app.suggest import (
@@ -37,8 +37,8 @@ from app.suggest import (
     iter_note_suggestions,
 )
 from app.text_limits import TEXT_LIMITS
-from app.thresholds import recommended_thresholds_for, threshold_mismatch_warnings
 from app.threshold_calibration import calibrate_thresholds
+from app.thresholds import recommended_thresholds_for, threshold_mismatch_warnings
 from app.vault_watcher import vault_watch
 from app.vectorstore import VectorStore
 

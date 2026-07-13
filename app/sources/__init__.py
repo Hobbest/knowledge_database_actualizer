@@ -5,13 +5,15 @@ from pathlib import Path
 from app.sources.base import LoadedSource
 from app.sources.pdf import PdfLoader
 from app.sources.text import TextLoader
+from app.sources.web import WebArticleLoader
 from app.sources.youtube import YouTubeLoader
 
 
 class SourceDispatcher:
     def __init__(self):
         self.path_loaders = [TextLoader(), PdfLoader()]
-        self.url_loaders = [YouTubeLoader()]
+        # Order matters: YouTube first, then the generic web-article fallback.
+        self.url_loaders = [YouTubeLoader(), WebArticleLoader()]
 
     def load_from_path(self, path: Path) -> LoadedSource:
         path = path.resolve()

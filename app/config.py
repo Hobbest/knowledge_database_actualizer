@@ -138,8 +138,8 @@ class Settings(BaseSettings):
 
     # Hard caps per analyze run (0 = unlimited). Counts every LLM complete()
     # (topic planning + note drafts). Input chars are a rough spend proxy.
-    llm_max_calls_per_run: int = 0
-    llm_max_input_chars_per_run: int = 0
+    llm_max_calls_per_run: int = 50
+    llm_max_input_chars_per_run: int = 400_000
 
     @model_validator(mode="after")
     def validate_thresholds(self):

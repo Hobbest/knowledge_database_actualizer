@@ -1,6 +1,6 @@
 # Knowledge Database Actualizer
 
-A local web app that helps you decide whether a knowledge source (YouTube video, PDF, text, markdown) contains **new information** relative to your Obsidian-style markdown vault.
+A local web app that helps you decide whether a knowledge source (YouTube video, web article, PDF, text, markdown) contains **new information** relative to your Obsidian-style markdown vault.
 
 > For system design (diagrams + module map), see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
@@ -45,7 +45,7 @@ download). CI runs the hermetic `tests/` suite only.
 ## Workflow
 
 1. Enter your vault path and click **Index vault** (optional: enable **Index on save** to re-index when you edit notes in the vault)
-2. Paste a YouTube URL or upload a file
+2. Paste a YouTube or article URL, or upload a file (any non-YouTube `http(s)` URL is treated as a web article — the main text is extracted with [trafilatura](https://trafilatura.readthedocs.io/), skipping navigation, ads, and comments)
 3. Review the verdict, overlapping notes, and novel snippets
 4. Edit the proposed atomic notes (one concept per note, with source location)
 5. Select notes and click **Write selected to vault**
@@ -149,7 +149,9 @@ Leave `ALLOWED_HOSTS` empty to disable the Host check.
 
 ### LLM spend caps
 
-Each drafted note is one LLM call (plus optional topic planning). Cap cost with:
+Each note may use one LLM call, or several notes may share one call when
+`LLM_DRAFT_BATCH_SIZE` > 1 (default `5`). Topic planning may add one more.
+Cap cost with:
 
 - `LLM_MAX_CALLS_PER_RUN` (default `50`) — hard limit on `complete()` calls per analyze
 - `LLM_MAX_INPUT_CHARS_PER_RUN` (default `400000`) — rough input-size budget (≈ tokens × 4)
@@ -278,11 +280,11 @@ This cuts round-trips on long sources while keeping the same per-note structure
 (frontmatter, Related notes, Source section).
 
 ```bash
-LLM_DRAFT_BATCH_SIZE=3   # draft up to 3 topics per call (default: 1)
+LLM_DRAFT_BATCH_SIZE=3   # draft up to 3 topics per call (default: 5)
 ```
 
-Set to `1` (default) for the original one-topic-per-call behavior. Requires an
-enabled LLM provider (`LLM_PROVIDER` not `none`).
+Set to `1` for the original one-topic-per-call behavior. Requires an enabled
+LLM provider (`LLM_PROVIDER` not `none`).
 
 #### Heading-targeted append
 
@@ -374,7 +376,7 @@ app/
   suggest.py         # draft + apply notes
   note_output.py     # note path patterns + append helpers
   vault_watcher.py   # debounced index-on-save
-  sources/           # YouTube, PDF, text loaders
+  sources/           # YouTube, web article, PDF, text loaders
   main.py            # FastAPI app
 obsidian-plugin/     # Obsidian thin client (optional)
 frontend/

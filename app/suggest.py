@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import re
 import shutil
@@ -22,13 +21,13 @@ from app.atomic_notes import (
     topic_location,
 )
 from app.block_refs import inject_block_references
+from app.checkpoint import SuggestionCheckpoint
 from app.config import settings
 from app.llm import call_with_retry, get_llm_provider, is_rate_limit_error
 from app.llm_budget import LLMBudget, estimate_run_cost_hint
 from app.media import media_for_location, render_media_section
 from app.note_output import (
     apply_note_template,
-    content_for_append,
     default_note_path,
     merge_append_into_note,
     moc_note_path,
@@ -239,6 +238,12 @@ def _source_section(source: LoadedSource, location: SourceLocation) -> str:
             "## Source\n\n"
             f"- Document: `{source.source_ref}`\n"
             f"- Location: {location_text}\n"
+        )
+    if source.source_type == "web":
+        return (
+            "## Source\n\n"
+            f"- Article: {source.source_ref}\n"
+            f"- Location: {location_text} (in extracted article text)\n"
         )
 
     return (

@@ -8,11 +8,11 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from app.atomic_notes import AtomicTopic
+from app.chunking import _split_by_headings
 from app.config import settings
 from app.obsidian_templates import discover_obsidian_template, expand_template_placeholders
 from app.sources.base import LoadedSource, SourceLocation
 from app.text_utils import combine_segment_text
-from app.chunking import _split_by_headings
 from app.vault import parse_note_text
 from app.vectorstore import VectorStore
 

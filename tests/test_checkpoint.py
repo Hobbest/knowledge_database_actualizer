@@ -18,6 +18,33 @@ def test_normalize_youtube_variants():
     assert a == b == c == "youtube:dQw4w9wgXcQ"
 
 
+def test_checkpoint_resume_matches_web_url_variants(tmp_data_dir):
+    ckpt = SuggestionCheckpoint.for_source("web", "https://example.com/post?utm_source=x")
+    ckpt.start(
+        {
+            "title": "Article",
+            "source_type": "web",
+            "source_ref": "https://example.com/post?utm_source=x",
+            "source_key": normalize_source_key("web", "https://example.com/post?utm_source=x"),
+        }
+    )
+    ckpt.add({"note_path": "a.md", "concept_title": "A", "content": "x", "segment_indices": [0]})
+    ckpt.finish(completed=False)
+
+    saved = load_checkpoint_for_source("web", "https://example.com/post/#comments")
+    assert saved and len(saved["suggestions"]) == 1
+    assert checkpoint_matches_source(
+        saved,
+        "https://example.com/post/#comments",
+        source_type="web",
+    )
+    assert not checkpoint_matches_source(
+        saved,
+        "https://other.example.com/post",
+        source_type="web",
+    )
+
+
 def test_checkpoint_resume_matches_youtube_variants(tmp_data_dir):
     ckpt = SuggestionCheckpoint.for_source("youtube", "https://youtu.be/dQw4w9wgXcQ")
     ckpt.start(

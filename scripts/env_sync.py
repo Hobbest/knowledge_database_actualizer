@@ -22,7 +22,6 @@ sys.path.insert(0, str(ROOT))
 
 from app.env_sync import (  # noqa: E402
     ENV_EXAMPLE_PATH,
-    LOCAL_ENV_PATH,
     env_example_is_current,
     merge_local_env,
     write_env_example,

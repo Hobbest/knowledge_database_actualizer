@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
-
 from app import main as main_module
 from app.threshold_calibration import calibrate_thresholds
 from app.vectorstore import VectorStore
+from fastapi.testclient import TestClient
 
 
 @pytest.fixture()

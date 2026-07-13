@@ -13,7 +13,6 @@ from app.sources.base import (
     SourceSegment,
 )
 from app.vault import (
-    extract_wikilinks,
     merge_note_tags,
     merge_note_wikilinks,
     parse_note_text,
@@ -21,10 +20,111 @@ from app.vault import (
 
 HEADING_LINE_PATTERN = re.compile(r"^#{1,3}\s+.+$")
 
+PARAGRAPH_TARGET_LINES = 25
+
+
+def segments_from_markdown(
+    raw_lines: list[str],
+    target_lines: int = PARAGRAPH_TARGET_LINES,
+) -> list[SourceSegment]:
+    """Split markdown lines into heading-delimited segments with line locations."""
+    segments: list[SourceSegment] = []
+    section_lines: list[str] = []
+    section_start: int | None = None
+
+    def flush(end_line: int) -> None:
+        nonlocal section_lines, section_start
+        if not section_lines or section_start is None:
+            section_lines = []
+            section_start = None
+            return
+
+        text = "\n".join(section_lines).strip()
+        if text:
+            segments.append(
+                SourceSegment(
+                    text=text,
+                    location=SourceLocation(line_start=section_start, line_end=end_line),
+                    index=len(segments),
+                )
+            )
+        section_lines = []
+        section_start = None
+
+    for line_number, line in enumerate(raw_lines, start=1):
+        if HEADING_LINE_PATTERN.match(line.strip()):
+            if section_lines:
+                flush(line_number - 1)
+            section_start = line_number
+            section_lines = [line]
+            continue
+
+        if section_start is None:
+            section_start = line_number
+        section_lines.append(line)
+
+        if len(section_lines) >= target_lines:
+            flush(line_number)
+
+    if section_lines and section_start is not None:
+        flush(len(raw_lines))
+
+    return segments or segments_from_lines(raw_lines, target_lines)
+
+
+def segments_from_lines(
+    raw_lines: list[str],
+    target_lines: int = PARAGRAPH_TARGET_LINES,
+) -> list[SourceSegment]:
+    """Split plain-text lines into paragraph segments with line locations."""
+    segments: list[SourceSegment] = []
+    paragraph_lines: list[str] = []
+    paragraph_start: int | None = None
+
+    def flush(end_line: int) -> None:
+        nonlocal paragraph_lines, paragraph_start
+        if not paragraph_lines or paragraph_start is None:
+            paragraph_lines = []
+            paragraph_start = None
+            return
+
+        text = "\n".join(paragraph_lines).strip()
+        if text:
+            segments.append(
+                SourceSegment(
+                    text=text,
+                    location=SourceLocation(
+                        line_start=paragraph_start,
+                        line_end=end_line,
+                    ),
+                    index=len(segments),
+                )
+            )
+        paragraph_lines = []
+        paragraph_start = None
+
+    for line_number, line in enumerate(raw_lines, start=1):
+        if not line.strip():
+            if paragraph_lines:
+                flush(line_number - 1)
+            continue
+
+        if paragraph_start is None:
+            paragraph_start = line_number
+        paragraph_lines.append(line)
+
+        if len(paragraph_lines) >= target_lines:
+            flush(line_number)
+
+    if paragraph_lines and paragraph_start is not None:
+        flush(len(raw_lines))
+
+    return segments
+
 
 class TextLoader(SourceLoader):
     SUPPORTED_EXTENSIONS = {".txt", ".md", ".markdown"}
-    PARAGRAPH_TARGET_LINES = 25
+    PARAGRAPH_TARGET_LINES = PARAGRAPH_TARGET_LINES
 
     def supports_path(self, path: Path) -> bool:
         return path.suffix.lower() in self.SUPPORTED_EXTENSIONS
@@ -80,90 +180,7 @@ class TextLoader(SourceLoader):
         return media
 
     def _segments_from_markdown(self, raw_lines: list[str]) -> list[SourceSegment]:
-        segments: list[SourceSegment] = []
-        section_lines: list[str] = []
-        section_start: int | None = None
-
-        def flush(end_line: int) -> None:
-            nonlocal section_lines, section_start
-            if not section_lines or section_start is None:
-                section_lines = []
-                section_start = None
-                return
-
-            text = "\n".join(section_lines).strip()
-            if text:
-                segments.append(
-                    SourceSegment(
-                        text=text,
-                        location=SourceLocation(line_start=section_start, line_end=end_line),
-                        index=len(segments),
-                    )
-                )
-            section_lines = []
-            section_start = None
-
-        for line_number, line in enumerate(raw_lines, start=1):
-            if HEADING_LINE_PATTERN.match(line.strip()):
-                if section_lines:
-                    flush(line_number - 1)
-                section_start = line_number
-                section_lines = [line]
-                continue
-
-            if section_start is None:
-                section_start = line_number
-            section_lines.append(line)
-
-            if len(section_lines) >= self.PARAGRAPH_TARGET_LINES:
-                flush(line_number)
-
-        if section_lines and section_start is not None:
-            flush(len(raw_lines))
-
-        return segments or self._segments_from_lines(raw_lines)
+        return segments_from_markdown(raw_lines, self.PARAGRAPH_TARGET_LINES)
 
     def _segments_from_lines(self, raw_lines: list[str]) -> list[SourceSegment]:
-        segments: list[SourceSegment] = []
-        paragraph_lines: list[str] = []
-        paragraph_start: int | None = None
-
-        def flush(end_line: int) -> None:
-            nonlocal paragraph_lines, paragraph_start
-            if not paragraph_lines or paragraph_start is None:
-                paragraph_lines = []
-                paragraph_start = None
-                return
-
-            text = "\n".join(paragraph_lines).strip()
-            if text:
-                segments.append(
-                    SourceSegment(
-                        text=text,
-                        location=SourceLocation(
-                            line_start=paragraph_start,
-                            line_end=end_line,
-                        ),
-                        index=len(segments),
-                    )
-                )
-            paragraph_lines = []
-            paragraph_start = None
-
-        for line_number, line in enumerate(raw_lines, start=1):
-            if not line.strip():
-                if paragraph_lines:
-                    flush(line_number - 1)
-                continue
-
-            if paragraph_start is None:
-                paragraph_start = line_number
-            paragraph_lines.append(line)
-
-            if len(paragraph_lines) >= self.PARAGRAPH_TARGET_LINES:
-                flush(line_number)
-
-        if paragraph_lines and paragraph_start is not None:
-            flush(len(raw_lines))
-
-        return segments
+        return segments_from_lines(raw_lines, self.PARAGRAPH_TARGET_LINES)

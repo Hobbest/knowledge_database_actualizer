@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
-
 from app.config import settings
 from app.note_output import (
     apply_note_template,
@@ -12,7 +11,7 @@ from app.note_output import (
     moc_note_path,
 )
 from app.sources.base import LoadedSource, SourceLocation
-from app.suggest import _build_frontmatter, _build_moc_suggestion, NoteSuggestion
+from app.suggest import NoteSuggestion, _build_frontmatter, _build_moc_suggestion
 
 
 def test_default_note_path_uses_output_folder(monkeypatch):

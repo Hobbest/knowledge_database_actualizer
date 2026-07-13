@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from app.config import settings
 from app.note_output import merge_append_into_note, parse_append_target
 from app.obsidian_templates import normalize_templater_syntax

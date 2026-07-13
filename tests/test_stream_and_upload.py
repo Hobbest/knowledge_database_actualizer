@@ -119,6 +119,32 @@ def test_consumer_close_sets_cancelled_for_producer():
     assert asyncio.run(scenario()), "closing the stream must signal the producer"
 
 
+def test_analyze_web_url_streams_ndjson_end_to_end(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A web article URL is fetched, extracted, and streamed like other sources."""
+    from tests.test_web_loader import ARTICLE_HTML
+
+    monkeypatch.setattr("app.sources.web.fetch_html", lambda url: ARTICLE_HTML)
+
+    with client.stream(
+        "POST",
+        "/api/sources/analyze",
+        data={"url": "https://example.com/post?utm_source=newsletter#intro"},
+    ) as response:
+        assert response.status_code == 200
+        events = [json.loads(line) for line in response.iter_lines() if line]
+
+    types = {event["type"] for event in events}
+    assert "result" in types
+    result = next(event for event in events if event["type"] == "result")
+    assert result["source"]["source_type"] == "web"
+    assert result["source"]["source_ref"] == "https://example.com/post"
+    assert result["source"]["title"] == "Understanding Vector Databases"
+    assert result["suggestions"], "expected at least one drafted note"
+
+
 def test_analyze_streams_ndjson_end_to_end(client: TestClient):
     """A small markdown upload streams progress events and a final result."""
     body = (
