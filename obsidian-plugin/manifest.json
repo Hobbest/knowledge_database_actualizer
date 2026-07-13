@@ -1,0 +1,9 @@
+{
+  "id": "knowledge-database-actualizer",
+  "name": "Knowledge Database Actualizer",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "Analyze sources against your vault, review drafted notes, and write them back via the local Actualizer API.",
+  "author": "Knowledge Database Actualizer",
+  "isDesktopOnly": true
+}

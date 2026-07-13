@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Ruff
+        run: ruff check app tests scripts
+
+      - name: Mypy
+        run: mypy
+
+      - name: Check .env.example
+        run: python scripts/env_sync.py check
+
+      - name: Run unit tests
+        run: pytest tests/ -q
+        env:
+          # Keep CI hermetic: no vault / LLM / embedding downloads.
+          LLM_PROVIDER: ""
+          LLM_API_KEY: ""
+          LLM_MODEL: ""
+          API_TOKEN: ""

@@ -1,0 +1,191 @@
+.actualizer-panel {
+  padding: 0.75rem;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.actualizer-panel h3 {
+  margin: 0 0 0.5rem;
+  font-size: 14px;
+}
+
+.actualizer-muted {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.actualizer-verdict {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 12px;
+  margin-bottom: 0.5rem;
+}
+
+.actualizer-verdict.known { background: #fee2e2; color: #991b1b; }
+.actualizer-verdict.partial { background: #fef3c7; color: #92400e; }
+.actualizer-verdict.novel { background: #dcfce7; color: #166534; }
+
+.actualizer-progress {
+  color: var(--text-muted);
+  margin: 0.5rem 0;
+  min-height: 1.2em;
+}
+
+.actualizer-suggestion-list {
+  margin-top: 0.5rem;
+}
+
+.actualizer-suggestion {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.actualizer-suggestion-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: flex-start;
+  margin-bottom: 0.35rem;
+}
+
+.actualizer-suggestion-header label {
+  display: flex;
+  gap: 0.35rem;
+  align-items: flex-start;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.actualizer-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-top: 0.35rem;
+}
+
+.actualizer-field > label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.actualizer-input,
+.actualizer-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  padding: 0.35rem 0.45rem;
+  font-size: 12px;
+}
+
+.actualizer-textarea {
+  min-height: 160px;
+  font-family: var(--font-monospace);
+  resize: vertical;
+}
+
+.actualizer-mode-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.actualizer-mode-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  cursor: pointer;
+}
+
+.actualizer-note-details,
+.actualizer-append-preview,
+.actualizer-overlap-panel {
+  margin-top: 0.35rem;
+}
+
+.actualizer-note-details summary,
+.actualizer-append-preview summary,
+.actualizer-overlap-panel summary {
+  cursor: pointer;
+  color: var(--text-accent);
+  font-size: 12px;
+}
+
+.actualizer-append-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+}
+
+.actualizer-preview-block {
+  white-space: pre-wrap;
+  font-size: 10px;
+  max-height: 140px;
+  overflow: auto;
+  margin: 0;
+  padding: 0.35rem;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-secondary);
+}
+
+.actualizer-overlap-list {
+  margin-top: 0.35rem;
+}
+
+.actualizer-overlap-item {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 0.35rem;
+  margin-bottom: 0.35rem;
+}
+
+.actualizer-overlap-title {
+  font-weight: 600;
+}
+
+.actualizer-overlap-heading {
+  font-size: 11px;
+  font-weight: 600;
+  margin-top: 0.2rem;
+}
+
+.actualizer-overlap-excerpt {
+  font-size: 11px;
+  margin-top: 0.2rem;
+  opacity: 0.9;
+}
+
+.actualizer-link-btn {
+  margin-top: 0.25rem;
+  font-size: 11px;
+}
+
+.actualizer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.75rem;
+}
+
+.actualizer-actions button {
+  font-size: 12px;
+}
+
+.actualizer-warnings {
+  color: var(--text-warning);
+  font-size: 12px;
+  margin-top: 0.5rem;
+}
+
+@media (max-width: 500px) {
+  .actualizer-append-grid {
+    grid-template-columns: 1fr;
+  }
+}

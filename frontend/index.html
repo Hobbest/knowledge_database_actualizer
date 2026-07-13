@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Knowledge Database Actualizer</title>
+  <script src="/static/vendor/tailwindcss.js"></script>
+  <script src="/static/vendor/vis-network.min.js"></script>
+  <style>
+    body { font-family: Inter, system-ui, sans-serif; }
+    .badge-known { background: #fee2e2; color: #991b1b; }
+    .badge-partial { background: #fef3c7; color: #92400e; }
+    .badge-novel { background: #dcfce7; color: #166534; }
+    #graph { height: 480px; border: 1px solid #e5e7eb; border-radius: 0.75rem; }
+    details.collapsible > summary {
+      list-style: none;
+      cursor: pointer;
+      user-select: none;
+    }
+    details.collapsible > summary::-webkit-details-marker { display: none; }
+    details.collapsible > summary .chevron {
+      display: inline-block;
+      transition: transform 0.15s ease;
+      color: #64748b;
+    }
+    details.collapsible[open] > summary .chevron { transform: rotate(90deg); }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div class="max-w-6xl mx-auto p-6 space-y-6">
+    <header class="space-y-2">
+      <h1 class="text-3xl font-bold">Knowledge Database Actualizer</h1>
+      <p class="text-slate-600">
+        Judge whether a source adds new information to your Obsidian vault, then review atomic note drafts.
+      </p>
+    </header>
+
+    <section class="bg-white rounded-xl shadow-sm border p-5 space-y-4">
+      <h2 class="text-xl font-semibold">Vault</h2>
+      <div class="flex flex-col md:flex-row gap-3">
+        <input
+          id="vaultPath"
+          type="text"
+          placeholder="/path/to/obsidian/vault"
+          class="flex-1 border rounded-lg px-3 py-2"
+        />
+        <button id="indexBtn" class="bg-slate-900 text-white px-4 py-2 rounded-lg hover:bg-slate-800">
+          Index vault
+        </button>
+        <button id="calibrateBtn" class="border px-4 py-2 rounded-lg hover:bg-slate-50" title="Suggest thresholds from indexed vault">
+          Calibrate thresholds
+        </button>
+        <label class="inline-flex items-center gap-2 border px-3 py-2 rounded-lg text-sm cursor-pointer hover:bg-slate-50">
+          <input id="vaultWatchToggle" type="checkbox" />
+          Index on save
+        </label>
+      </div>
+      <div id="statusBox" class="text-sm text-slate-600">Loading status...</div>
+    </section>
+
+    <section class="bg-white rounded-xl shadow-sm border p-5 space-y-4">
+      <h2 class="text-xl font-semibold">Analyze source</h2>
+      <div class="grid md:grid-cols-2 gap-4">
+        <div class="space-y-2">
+          <label for="sourceUrl" class="text-sm font-medium">YouTube URL</label>
+          <input
+            id="sourceUrl"
+            type="url"
+            placeholder="https://www.youtube.com/watch?v=..."
+            class="w-full border rounded-lg px-3 py-2"
+          />
+        </div>
+        <div class="space-y-2">
+          <label for="sourceFile" class="text-sm font-medium">Or upload file (txt, md, pdf)</label>
+          <input
+            id="sourceFile"
+            type="file"
+            accept=".txt,.md,.markdown,.pdf"
+            class="w-full border rounded-lg px-3 py-2"
+          />
+        </div>
+      </div>
+      <div class="flex flex-wrap gap-3">
+        <button id="analyzeBtn" class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-500">
+          Analyze
+        </button>
+        <button id="recoverBtn" class="border px-4 py-2 rounded-lg hover:bg-slate-50" title="Load notes saved during the last run">
+          Recover last saved notes
+        </button>
+        <button id="continueBtn" class="hidden border border-indigo-300 text-indigo-700 px-4 py-2 rounded-lg hover:bg-indigo-50" title="Draft only the notes still missing from the interrupted run">
+          Continue interrupted run
+        </button>
+      </div>
+      <div id="analyzeError" class="text-red-600 text-sm hidden"></div>
+
+      <div id="analyzeProgress" class="hidden space-y-2">
+        <div class="flex items-center justify-between text-sm">
+          <span id="progressLabel" class="text-slate-600">Working...</span>
+          <span id="progressCount" class="text-slate-400 tabular-nums"></span>
+        </div>
+        <div class="w-full bg-slate-200 rounded-full h-2 overflow-hidden">
+          <div
+            id="progressBar"
+            class="bg-indigo-600 h-2 rounded-full transition-all duration-300"
+            style="width: 0%"
+          ></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="resultsSection" class="hidden space-y-4">
+      <div class="bg-white rounded-xl shadow-sm border p-5 space-y-3">
+        <div class="flex items-center justify-between gap-3">
+          <h2 class="text-xl font-semibold">Verdict</h2>
+          <span id="verdictBadge" class="px-3 py-1 rounded-full text-sm font-medium"></span>
+        </div>
+        <div class="grid md:grid-cols-3 gap-3 text-sm">
+          <div class="p-3 bg-slate-50 rounded-lg">
+            <div class="text-slate-500">Novelty score</div>
+            <div id="noveltyScore" class="text-lg font-semibold"></div>
+          </div>
+          <div class="p-3 bg-slate-50 rounded-lg">
+            <div class="text-slate-500">Source</div>
+            <div id="sourceTitle" class="font-medium break-all"></div>
+          </div>
+          <div class="p-3 bg-slate-50 rounded-lg">
+            <div class="text-slate-500">Type</div>
+            <div id="sourceType"></div>
+          </div>
+        </div>
+        <div id="sourceMeta" class="hidden text-sm text-slate-600 space-y-1"></div>
+      </div>
+
+      <div id="tagOverlapBox" class="hidden bg-white rounded-xl shadow-sm border p-4 text-sm">
+        <div class="font-semibold mb-2">Vault tags in overlap</div>
+        <div id="tagOverlapList" class="flex flex-wrap gap-2"></div>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-4">
+        <details id="overlapPanel" class="collapsible bg-white rounded-xl shadow-sm border p-5">
+          <summary class="flex items-center justify-between gap-3 font-semibold">
+            <span class="inline-flex items-center gap-2">
+              <span class="chevron" aria-hidden="true">▸</span>
+              Overlapping notes
+            </span>
+            <span id="overlapCount" class="text-sm font-normal text-slate-500 tabular-nums"></span>
+          </summary>
+          <ul id="overlapList" class="mt-3 space-y-3 text-sm max-h-96 overflow-y-auto"></ul>
+        </details>
+        <details id="novelPanel" class="collapsible bg-white rounded-xl shadow-sm border p-5">
+          <summary class="flex items-center justify-between gap-3 font-semibold">
+            <span class="inline-flex items-center gap-2">
+              <span class="chevron" aria-hidden="true">▸</span>
+              Novel snippets
+            </span>
+            <span id="novelCount" class="text-sm font-normal text-slate-500 tabular-nums"></span>
+          </summary>
+          <ul id="novelList" class="mt-3 space-y-2 text-sm max-h-96 overflow-y-auto"></ul>
+        </details>
+      </div>
+
+      <div class="bg-white rounded-xl shadow-sm border p-5 space-y-4">
+        <div class="flex items-center justify-between gap-3">
+          <h3 class="font-semibold">Proposed notes</h3>
+          <span id="suggestionCount" class="text-sm text-slate-500"></span>
+        </div>
+        <p class="text-sm text-slate-600">
+          Each note covers one concept and includes a checkable source location. Edit paths or content before writing.
+        </p>
+
+        <div id="warningsBox" class="hidden text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-1"></div>
+
+        <div id="suggestionToolbar" class="hidden flex-wrap items-center justify-between gap-3 border-y py-2">
+          <div class="flex items-center gap-2 text-sm">
+            <button id="selectAllBtn" class="px-2 py-1 rounded border hover:bg-slate-50">Select all</button>
+            <button id="clearAllBtn" class="px-2 py-1 rounded border hover:bg-slate-50">Clear</button>
+          </div>
+          <label class="flex items-center gap-2 text-sm text-slate-600">
+            Notes per page
+            <select id="pageSizeSelect" class="border rounded-lg px-2 py-1 bg-white">
+              <option value="5">5</option>
+              <option value="10" selected>10</option>
+              <option value="20">20</option>
+              <option value="50">50</option>
+              <option value="all">All</option>
+            </select>
+          </label>
+        </div>
+
+        <div id="suggestionsList" class="space-y-4"></div>
+
+        <div id="suggestionPager" class="hidden items-center justify-between gap-3 text-sm">
+          <button id="prevPageBtn" class="px-3 py-1 rounded border hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed">
+            Previous
+          </button>
+          <span id="pageLabel" class="text-slate-600"></span>
+          <button id="nextPageBtn" class="px-3 py-1 rounded border hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed">
+            Next
+          </button>
+        </div>
+
+        <div class="flex gap-3">
+          <button id="writeAllBtn" class="bg-emerald-600 text-white px-4 py-2 rounded-lg hover:bg-emerald-500">
+            Write selected to vault
+          </button>
+        </div>
+        <div id="applyMessage" class="text-sm"></div>
+      </div>
+
+      <div class="bg-white rounded-xl shadow-sm border p-5">
+        <h3 class="font-semibold mb-3">Knowledge graph</h3>
+        <div id="graph"></div>
+      </div>
+    </section>
+  </div>
+
+  <script src="/static/app.js?v=3"></script>
+</body>
+</html>
