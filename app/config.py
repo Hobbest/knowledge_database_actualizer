@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     # are buffered in memory before analysis.
     max_upload_mb: int = 0
 
+    # Comma-separated BCP-47 language codes for YouTube transcripts (tried in
+    # order). When none match, the loader falls back to the first available
+    # transcript language.
+    youtube_transcript_languages: str = "en,en-US,en-GB"
+
     # Skip non-substantive sections (acknowledgements, tables of contents,
     # reference lists, chapter summaries, contact/copyright pages) when planning.
     filter_boilerplate: bool = True

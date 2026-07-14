@@ -1,9 +1,9 @@
 {
   "id": "knowledge-database-actualizer",
   "name": "Knowledge Database Actualizer",
-  "version": "0.1.0",
+  "version": "0.3.1",
   "minAppVersion": "1.4.0",
-  "description": "Analyze sources against your vault, review drafted notes, and write them back via the local Actualizer API.",
+  "description": "Analyze YouTube, web articles, PDFs, and vault notes from the sidebar; review and write atomic notes back into Obsidian.",
   "author": "Knowledge Database Actualizer",
   "isDesktopOnly": true
 }

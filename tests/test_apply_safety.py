@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from app.suggest import apply_suggestion, apply_suggestions
@@ -32,6 +34,28 @@ def test_apply_path_traversal_blocked(tmp_path: Path):
     assert result.status == "error"
 
 
+def test_atomic_write_preserves_existing_on_replace_failure(tmp_path: Path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "notes/a.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("original\n", encoding="utf-8")
+
+    original_replace = os.replace
+
+    def flaky_replace(src, dst):
+        if Path(dst) == note:
+            raise OSError("simulated disk failure")
+        return original_replace(src, dst)
+
+    with patch("app.suggest.os.replace", side_effect=flaky_replace):
+        result = apply_suggestion(vault, "notes/a.md", "replacement\n", overwrite=True)
+
+    assert result.status == "error"
+    assert note.read_text() == "original\n"
+    assert not list(note.parent.glob("*.tmp"))
+
+
 def test_apply_batch_continues_after_error(tmp_path: Path):
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -55,6 +79,32 @@ def client(tmp_data_dir, vector_store, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(main_module, "vector_store", vector_store)
     monkeypatch.setattr(main_module.settings, "vault_path", None)
     return TestClient(main_module.app, base_url="http://127.0.0.1")
+
+
+def test_refresh_notes_endpoint(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import app.main as main_module
+
+    vault = tmp_path / "obsidian"
+    vault.mkdir()
+    note_path = vault / "fresh.md"
+    note_path.write_text("# Fresh\n\nBody.\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def fake_refresh(vault_path, written_paths):
+        calls.append(list(written_paths))
+        return {"indexed_notes": len(written_paths), "chunk_count": 42}
+
+    monkeypatch.setattr(main_module, "_refresh_written_notes", fake_refresh)
+
+    response = client.post(
+        "/api/vault/refresh-notes",
+        json={"vault_path": str(vault), "note_paths": ["fresh.md"]},
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["indexed_notes"] == 1
+    assert calls == [["fresh.md"]]
 
 
 def test_apply_batch_accepts_vault_path_from_request(client: TestClient, tmp_path: Path):

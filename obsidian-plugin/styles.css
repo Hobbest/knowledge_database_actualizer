@@ -9,6 +9,116 @@
   font-size: 14px;
 }
 
+.actualizer-panel h4 {
+  margin: 0.75rem 0 0.35rem;
+  font-size: 13px;
+}
+
+.actualizer-divider {
+  margin: 0.75rem 0;
+  border: none;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.actualizer-analyze-section {
+  margin-bottom: 0.5rem;
+}
+
+.actualizer-status-line {
+  margin-bottom: 0.35rem;
+}
+
+.actualizer-file-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.actualizer-file-input {
+  font-size: 11px;
+  width: 100%;
+}
+
+.actualizer-file-name {
+  word-break: break-all;
+}
+
+.actualizer-quick-actions {
+  margin-top: 0.35rem;
+}
+
+.actualizer-error {
+  color: var(--text-error);
+  font-size: 12px;
+  margin-top: 0.35rem;
+}
+
+.actualizer-progress-box {
+  margin: 0.5rem 0;
+}
+
+.actualizer-progress-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 12px;
+  margin-bottom: 0.25rem;
+}
+
+.actualizer-progress-track {
+  width: 100%;
+  height: 6px;
+  background: var(--background-modifier-border);
+  border-radius: 9999px;
+  overflow: hidden;
+}
+
+.actualizer-progress-bar {
+  height: 100%;
+  background: var(--interactive-accent);
+  border-radius: 9999px;
+  transition: width 0.25s ease;
+}
+
+.actualizer-live-drafts {
+  margin: 0.5rem 0;
+  padding: 0.5rem;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+}
+
+.actualizer-live-drafts h4 {
+  margin: 0 0 0.25rem;
+}
+
+.actualizer-live-count {
+  margin-bottom: 0.35rem;
+}
+
+.actualizer-live-list {
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.actualizer-live-item {
+  padding: 0.3rem 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.actualizer-live-item:last-child {
+  border-bottom: none;
+}
+
+.actualizer-live-title {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.actualizer-live-empty {
+  font-style: italic;
+}
+
 .actualizer-muted {
   color: var(--text-muted);
   font-size: 11px;
@@ -176,6 +286,12 @@
 
 .actualizer-actions button {
   font-size: 12px;
+}
+
+.actualizer-write-status {
+  color: var(--text-success);
+  font-size: 12px;
+  margin-top: 0.5rem;
 }
 
 .actualizer-warnings {

@@ -9,6 +9,7 @@ import urllib.request
 from pathlib import Path
 
 from app.source_identity import canonical_youtube_url, extract_youtube_video_id
+from app.config import settings
 from app.sources.base import (
     LoadedSource,
     SourceLoader,
@@ -19,6 +20,15 @@ from app.sources.base import (
 logger = logging.getLogger(__name__)
 
 WINDOW_SECONDS = 30.0
+DEFAULT_TRANSCRIPT_LANGUAGES = ("en", "en-US", "en-GB")
+
+
+def youtube_transcript_language_list() -> list[str]:
+    raw = settings.youtube_transcript_languages.strip()
+    if not raw:
+        return list(DEFAULT_TRANSCRIPT_LANGUAGES)
+    languages = [item.strip() for item in raw.split(",") if item.strip()]
+    return languages or list(DEFAULT_TRANSCRIPT_LANGUAGES)
 
 
 def extract_video_id(url: str) -> str | None:
@@ -91,9 +101,14 @@ class YouTubeLoader(SourceLoader):
 
     def _fetch_via_transcript_api(self, video_id: str) -> list[SourceSegment]:
         from youtube_transcript_api import YouTubeTranscriptApi
+        from youtube_transcript_api._errors import NoTranscriptFound
 
         ytt_api = YouTubeTranscriptApi()
-        transcript = ytt_api.fetch(video_id, languages=["en", "en-US", "en-GB"])
+        languages = youtube_transcript_language_list()
+        try:
+            transcript = ytt_api.fetch(video_id, languages=languages)
+        except NoTranscriptFound:
+            transcript = self._fetch_first_available_transcript(ytt_api, video_id)
         snippets = [
             {
                 "text": snippet.text.strip(),
@@ -106,6 +121,12 @@ class YouTubeLoader(SourceLoader):
         if not snippets:
             return []
         return self._window_snippets(snippets)
+
+    def _fetch_first_available_transcript(self, ytt_api, video_id: str):
+        transcript_list = ytt_api.list_transcripts(video_id)
+        for transcript in transcript_list:
+            return transcript.fetch()
+        raise ValueError(f"No transcript available for YouTube video: {video_id}")
 
     def _window_snippets(self, snippets: list[dict]) -> list[SourceSegment]:
         segments: list[SourceSegment] = []
@@ -148,12 +169,13 @@ class YouTubeLoader(SourceLoader):
         import yt_dlp
 
         url = f"https://www.youtube.com/watch?v={video_id}"
+        languages = youtube_transcript_language_list()
         with tempfile.TemporaryDirectory() as tmpdir:
             ydl_opts = {
                 "skip_download": True,
                 "writesubtitles": True,
                 "writeautomaticsub": True,
-                "subtitleslangs": ["en", "en-US", "en-GB"],
+                "subtitleslangs": languages,
                 "subtitlesformat": "vtt",
                 "outtmpl": f"{tmpdir}/%(id)s",
                 "quiet": True,
@@ -163,6 +185,14 @@ class YouTubeLoader(SourceLoader):
                 title = info.get("title") or fetch_youtube_title(video_id)
 
             vtt_files = list(Path(tmpdir).glob("*.vtt"))
+            if not vtt_files:
+                fallback_opts = {
+                    **ydl_opts,
+                    "subtitleslangs": ["all"],
+                }
+                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                    ydl.extract_info(url, download=True)
+                vtt_files = list(Path(tmpdir).glob("*.vtt"))
             if not vtt_files:
                 raise ValueError(f"No transcript available for YouTube video: {video_id}")
 

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
+import tempfile
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
@@ -995,6 +997,21 @@ def _backup_existing_note(target: Path, vault_path: Path) -> str:
     return backup.relative_to(vault_path.resolve()).as_posix()
 
 
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write UTF-8 text via temp file + rename so crashes cannot truncate notes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+
+
 def apply_suggestion(
     vault_path: Path,
     note_path: str,
@@ -1022,11 +1039,11 @@ def apply_suggestion(
                 target_heading=append_heading,
                 fallback_heading="Update",
             )
-            target.write_text(merged, encoding="utf-8")
+            _atomic_write_text(target, merged)
             return ApplyNoteResult(note_path=note_path, status="appended", written_path=rel)
 
         if mode == "append" and not target.exists():
-            target.write_text(inject_block_references(content.strip()) + "\n", encoding="utf-8")
+            _atomic_write_text(target, inject_block_references(content.strip()) + "\n")
             return ApplyNoteResult(note_path=note_path, status="written", written_path=rel)
 
         if mode == "write" and target.exists() and not overwrite:
@@ -1042,7 +1059,7 @@ def apply_suggestion(
             backup_path = _backup_existing_note(target, vault_path)
             overwritten = True
 
-        target.write_text(inject_block_references(content), encoding="utf-8")
+        _atomic_write_text(target, inject_block_references(content))
         return ApplyNoteResult(
             note_path=note_path,
             status="written",

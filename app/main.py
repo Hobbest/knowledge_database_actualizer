@@ -163,6 +163,11 @@ class ApplySuggestionsBatchRequest(BaseModel):
     vault_path: str | None = None
 
 
+class RefreshNotesRequest(BaseModel):
+    vault_path: str | None = None
+    note_paths: list[str] = Field(default_factory=list)
+
+
 def _ensure_vault_configured() -> Path:
     if not settings.vault_path:
         raise HTTPException(status_code=400, detail="Vault path is not configured")
@@ -720,6 +725,19 @@ def get_suggestions_checkpoint(source_key: str | None = None):
     if not data:
         return {"exists": False}
     return {"exists": True, **data}
+
+
+@app.post("/api/vault/refresh-notes")
+async def refresh_vault_notes(request: RefreshNotesRequest):
+    """Re-embed notes already written to disk (e.g. via the Obsidian plugin vault API)."""
+    vault_path = _resolve_vault_path(request.vault_path)
+    if not request.note_paths:
+        raise HTTPException(status_code=400, detail="note_paths is required")
+
+    def _refresh() -> dict:
+        return _refresh_written_notes(vault_path, request.note_paths)
+
+    return await asyncio.get_running_loop().run_in_executor(WORKER_POOL, _refresh)
 
 
 @app.post("/api/suggestions/apply-batch")

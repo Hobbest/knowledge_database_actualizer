@@ -111,6 +111,13 @@ ENV_SECTIONS: tuple[EnvSection, ...] = (
     ),
     EnvSection(
         header=(
+            "# YouTube transcript languages (BCP-47 codes, comma-separated, tried in order).",
+            "# When none match, the loader falls back to the first available transcript.",
+        ),
+        fields=("youtube_transcript_languages",),
+    ),
+    EnvSection(
+        header=(
             "# Skip non-substantive sections (acknowledgements, table of contents, reference",
             "# lists, chapter summaries, contact/copyright pages) when generating notes.",
             "# Set to false to keep every section.",

@@ -108,6 +108,7 @@ See `.env.example` for:
 - `NOTE_OUTPUT_FOLDER`, `NOTE_OUTPUT_LAYOUT`, `NOTE_OUTPUT_PATTERN` — where new atomic notes are written (see [Vault workflow](#vault-workflow-phase-d))
 - `VAULT_WATCH_ENABLED`, `VAULT_WATCH_DEBOUNCE_SECONDS` — automatic re-index on vault saves
 - `ANALYZE_IN_PLACE_ENABLED` — append to the analyzed note when overlap targets it
+- `YOUTUBE_TRANSCRIPT_LANGUAGES` — BCP-47 codes tried in order for YouTube transcripts (default `en,en-US,en-GB`); falls back to any available language when none match
 
 **Important:** Gemini chat models (e.g. `gemini-2.0-flash`) belong in `LLM_MODEL`, not `EMBEDDING_MODEL`. For Gemini embeddings use `EMBEDDING_PROVIDER=gemini` and `EMBEDDING_MODEL=gemini-embedding-001`.
 
@@ -179,6 +180,14 @@ then raise `MAX_NOTES_PER_SOURCE` if you hit the cap.
 acknowledgements, tables of contents, reference lists, indexes, chapter
 summaries, and contact/copyright pages, so they do not become notes. Set it to
 `false` to keep everything.
+
+### YouTube transcript languages
+
+Non-English videos fail with the old English-only default unless you configure
+preferred languages. Set comma-separated BCP-47 codes in
+`YOUTUBE_TRANSCRIPT_LANGUAGES` (for example `ru,en`). The loader tries each code
+in order, then falls back to the first transcript YouTube exposes when none of
+your preferences match.
 
 It also drops **low-value blocks** detected structurally — link/URL dumps,
 citation-marker lists (`[17] http://…[18] http://…`), and export watermarks
@@ -331,6 +340,7 @@ releases.
 - `GET /api/suggestions/checkpoint` — the last run's saved notes (crash/rate-limit recovery)
 - `POST /api/suggestions/apply` `{ "note_path", "content", "mode": "write|append", "overwrite": false, "append_heading": null }` — also re-indexes written notes; `append_heading` inserts under a matching `##` section when mode is `append`
 - `POST /api/suggestions/apply-batch` `{ "notes": [{ "note_path", "content", "mode", "overwrite", "append_heading" }] }` — returns per-note `results`, `written_paths`, `skipped_existing`, `errors`, and `index_refresh`
+- `POST /api/vault/refresh-notes` `{ "vault_path", "note_paths" }` — re-embed notes already written via the Obsidian plugin (or other external tools)
 
 ## Sample vault
 
