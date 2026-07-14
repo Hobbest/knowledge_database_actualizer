@@ -117,7 +117,9 @@ app/
 ├── sources/
 │   ├── base.py               LoadedSource (+ wikilinks, tags), SourceSegment, SourceLocation
 │   ├── __init__.py           SourceDispatcher
-│   ├── pdf.py                PdfLoader (page segments + tables when enabled)
+│   ├── pdf.py                PdfLoader (page segments + tables; quality warnings)
+│   ├── epub.py               EpubLoader (chapter segments via trafilatura)
+│   ├── docx.py               DocxLoader (mammoth → markdown segments)
 │   ├── text.py               TextLoader (strips frontmatter; extracts wikilinks/tags)
 │   ├── web.py                WebArticleLoader (trafilatura main-content extraction)
 │   └── youtube.py            YouTubeLoader (canonical watch URL)

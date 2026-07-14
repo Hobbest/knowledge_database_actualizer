@@ -1,7 +1,36 @@
 .actualizer-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
   padding: 0.75rem;
   font-size: 13px;
   line-height: 1.45;
+  box-sizing: border-box;
+}
+
+.actualizer-view-root {
+  height: 100%;
+  overflow: hidden !important;
+  display: flex;
+  flex-direction: column;
+}
+
+.actualizer-panel-fixed {
+  flex-shrink: 0;
+}
+
+.actualizer-results-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  margin-top: 0.25rem;
+  padding-right: 2px;
 }
 
 .actualizer-panel h3 {
@@ -99,6 +128,9 @@
 .actualizer-live-list {
   max-height: 180px;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
 }
 
 .actualizer-live-item {

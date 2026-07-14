@@ -4,6 +4,8 @@ from pathlib import Path
 
 from app.sources.base import LoadedSource
 from app.sources.pdf import PdfLoader
+from app.sources.docx import DocxLoader
+from app.sources.epub import EpubLoader
 from app.sources.text import TextLoader
 from app.sources.web import WebArticleLoader
 from app.sources.youtube import YouTubeLoader
@@ -11,7 +13,7 @@ from app.sources.youtube import YouTubeLoader
 
 class SourceDispatcher:
     def __init__(self):
-        self.path_loaders = [TextLoader(), PdfLoader()]
+        self.path_loaders = [TextLoader(), PdfLoader(), EpubLoader(), DocxLoader()]
         # Order matters: YouTube first, then the generic web-article fallback.
         self.url_loaders = [YouTubeLoader(), WebArticleLoader()]
 

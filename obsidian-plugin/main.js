@@ -176,6 +176,53 @@ function computeProgress(event) {
   }
 }
 
+function enableNestedScroll(element) {
+  if (!element || element.dataset.actualizerNestedScroll === "1") {
+    return;
+  }
+  element.dataset.actualizerNestedScroll = "1";
+  element.addEventListener(
+    "wheel",
+    (event) => {
+      const { deltaY } = event;
+      if (!deltaY) {
+        return;
+      }
+      const { scrollTop, scrollHeight, clientHeight } = element;
+      const canScrollUp = scrollTop > 0;
+      const canScrollDown = scrollTop + clientHeight < scrollHeight - 1;
+      if ((deltaY < 0 && canScrollUp) || (deltaY > 0 && canScrollDown)) {
+        event.stopPropagation();
+      }
+    },
+    { passive: true }
+  );
+}
+
+function enableScrollContainer(element) {
+  if (!element || element.dataset.actualizerScrollContainer === "1") {
+    return;
+  }
+  element.dataset.actualizerScrollContainer = "1";
+  element.addEventListener(
+    "wheel",
+    (event) => {
+      const { deltaY } = event;
+      if (!deltaY || element.scrollHeight <= element.clientHeight + 1) {
+        return;
+      }
+      const maxScroll = element.scrollHeight - element.clientHeight;
+      const nextScroll = Math.max(0, Math.min(maxScroll, element.scrollTop + deltaY));
+      if (nextScroll !== element.scrollTop) {
+        element.scrollTop = nextScroll;
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    },
+    { passive: false }
+  );
+}
+
 function concatUint8Arrays(chunks) {
   const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
   const out = new Uint8Array(total);
@@ -535,10 +582,15 @@ class ActualizerView extends ItemView {
   }
 
   async onOpen() {
+    this.containerEl.addClass("actualizer-view-root");
     await this.refreshCheckpointState();
     await this.refreshServerStatus();
     this.prefillSourceFromContext();
     this.render();
+  }
+
+  async onClose() {
+    this.containerEl.removeClass("actualizer-view-root");
   }
 
   prefillSourceFromContext() {
@@ -719,13 +771,13 @@ class ActualizerView extends ItemView {
     };
 
     const fileField = section.createEl("div", { cls: "actualizer-field" });
-    fileField.createEl("label", { text: "Or upload file (txt, md, pdf)" });
+    fileField.createEl("label", { text: "Or upload file (txt, md, pdf, epub, docx)" });
     const fileRow = fileField.createEl("div", { cls: "actualizer-file-row" });
     const fileInput = fileRow.createEl("input", {
       type: "file",
       cls: "actualizer-file-input",
     });
-    fileInput.setAttr("accept", ".txt,.md,.markdown,.pdf");
+    fileInput.setAttr("accept", ".txt,.md,.markdown,.pdf,.epub,.docx");
     fileInput.onchange = () => {
       const picked = fileInput.files?.[0];
       this.pendingFile = picked ? { name: picked.name, blob: picked } : null;
@@ -835,6 +887,7 @@ class ActualizerView extends ItemView {
       text: count ? `${count} note(s) drafted so far` : "Waiting for first note...",
     });
     const listHost = section.createEl("div", { cls: "actualizer-live-list" });
+    enableNestedScroll(listHost);
     this._ui.liveDraftsSection = section;
     this._ui.liveDraftCount = countEl;
     this._ui.liveNotesHost = listHost;
@@ -1075,66 +1128,39 @@ class ActualizerView extends ItemView {
       const grid = host.createEl("div", { cls: "actualizer-append-grid" });
       const current = grid.createEl("pre", { cls: "actualizer-preview-block" });
       current.setText(existing.content || "(empty note)");
+      enableNestedScroll(current);
       const next = grid.createEl("pre", { cls: "actualizer-preview-block" });
       next.setText(proposed || "(nothing to append)");
+      enableNestedScroll(next);
     } catch (err) {
       host.setText(`Preview failed: ${err.message}`);
     }
   }
 
-  render() {
-    const { containerEl } = this;
-    containerEl.empty();
-    containerEl.addClass("actualizer-panel");
-    this._ui = {};
-
-    containerEl.createEl("h3", { text: "Knowledge Actualizer" });
-
-    this.renderAnalyzeSource(containerEl);
-    this.renderProgressBar(containerEl);
-
-    if (this.isAnalyzing) {
-      this.renderLiveDraftsSection(containerEl);
-      if (this.warnings.length) {
-        const warn = containerEl.createEl("div", { cls: "actualizer-warnings" });
-        warn.setText(this.warnings.join(" "));
-      }
-      if (!this.result) {
-        return;
-      }
-    }
-
-    if (!this.result) {
-      if (this.warnings.length) {
-        const warn = containerEl.createEl("div", { cls: "actualizer-warnings" });
-        warn.setText(this.warnings.join(" "));
-      }
-      return;
-    }
-
-    containerEl.createEl("hr", { cls: "actualizer-divider" });
-    containerEl.createEl("h4", { text: "Results" });
+  renderResults(container) {
+    container.createEl("hr", { cls: "actualizer-divider" });
+    container.createEl("h4", { text: "Results" });
 
     const verdict = this.result.novelty?.verdict || "—";
-    containerEl.createEl("span", {
+    container.createEl("span", {
       cls: `actualizer-verdict ${this.verdictClass(verdict)}`,
       text: verdict,
     });
 
     const source = this.result.source || {};
-    containerEl.createEl("div", {
+    container.createEl("div", {
       text: `${source.title || "Source"} (${source.source_type || "?"})`,
     });
 
-    this.renderOverlap(containerEl, this.result.novelty?.overlapping_notes || []);
-    this.renderNovel(containerEl, this.result.novelty?.novel_chunks || []);
+    this.renderOverlap(container, this.result.novelty?.overlapping_notes || []);
+    this.renderNovel(container, this.result.novelty?.novel_chunks || []);
 
-    containerEl.createEl("div", {
+    container.createEl("div", {
       cls: "actualizer-muted",
       text: `${this.suggestions.length} proposed note(s) · ${this.selected.size} selected`,
     });
 
-    const selectionRow = containerEl.createEl("div", { cls: "actualizer-actions" });
+    const selectionRow = container.createEl("div", { cls: "actualizer-actions" });
     selectionRow.createEl("button", { text: "Select all" }).onclick = () => {
       this.selected = new Set(
         this.suggestions.map((item, index) => (item.is_moc ? null : index)).filter((i) => i !== null)
@@ -1146,12 +1172,12 @@ class ActualizerView extends ItemView {
       this.render();
     };
 
-    const list = containerEl.createEl("div", { cls: "actualizer-suggestion-list" });
+    const list = container.createEl("div", { cls: "actualizer-suggestion-list" });
     for (let i = 0; i < this.suggestions.length; i += 1) {
       this.renderSuggestion(list, this.suggestions[i], i);
     }
 
-    const actions = containerEl.createEl("div", { cls: "actualizer-actions" });
+    const actions = container.createEl("div", { cls: "actualizer-actions" });
     actions
       .createEl("button", { text: "Write selected to vault", cls: "mod-cta" })
       .onclick = () => this.writeSelected();
@@ -1166,16 +1192,54 @@ class ActualizerView extends ItemView {
       window.open(this.plugin.settings.apiBaseUrl, "_blank");
 
     if (this.writeStatus) {
-      containerEl.createEl("div", {
+      container.createEl("div", {
         cls: "actualizer-write-status",
         text: this.writeStatus,
       });
     }
 
     if (this.warnings.length) {
-      const warn = containerEl.createEl("div", { cls: "actualizer-warnings" });
+      const warn = container.createEl("div", { cls: "actualizer-warnings" });
       warn.setText(this.warnings.join(" "));
     }
+  }
+
+  render() {
+    const { containerEl } = this;
+    containerEl.empty();
+    containerEl.addClass("actualizer-panel");
+    containerEl.addClass("actualizer-view-root");
+    this._ui = {};
+
+    const fixed = containerEl.createEl("div", { cls: "actualizer-panel-fixed" });
+    fixed.createEl("h3", { text: "Knowledge Actualizer" });
+
+    this.renderAnalyzeSource(fixed);
+    this.renderProgressBar(fixed);
+
+    if (this.isAnalyzing) {
+      this.renderLiveDraftsSection(fixed);
+      if (this.warnings.length) {
+        const warn = fixed.createEl("div", { cls: "actualizer-warnings" });
+        warn.setText(this.warnings.join(" "));
+      }
+      if (!this.result) {
+        return;
+      }
+    }
+
+    if (!this.result) {
+      if (this.warnings.length) {
+        const warn = fixed.createEl("div", { cls: "actualizer-warnings" });
+        warn.setText(this.warnings.join(" "));
+      }
+      return;
+    }
+
+    const resultsScroll = containerEl.createEl("div", { cls: "actualizer-results-scroll" });
+    enableScrollContainer(resultsScroll);
+    this._ui.resultsScroll = resultsScroll;
+    this.renderResults(resultsScroll);
   }
 
   async recoverCheckpoint() {

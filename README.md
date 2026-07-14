@@ -1,6 +1,6 @@
 # Knowledge Database Actualizer
 
-A local web app that helps you decide whether a knowledge source (YouTube video, web article, PDF, text, markdown) contains **new information** relative to your Obsidian-style markdown vault.
+A local web app that helps you decide whether a knowledge source (YouTube video, web article, PDF, EPUB, DOCX, text, markdown) contains **new information** relative to your Obsidian-style markdown vault.
 
 > For system design (diagrams + module map), see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
@@ -45,7 +45,7 @@ download). CI runs the hermetic `tests/` suite only.
 ## Workflow
 
 1. Enter your vault path and click **Index vault** (optional: enable **Index on save** to re-index when you edit notes in the vault)
-2. Paste a YouTube or article URL, or upload a file (any non-YouTube `http(s)` URL is treated as a web article — the main text is extracted with [trafilatura](https://trafilatura.readthedocs.io/), skipping navigation, ads, and comments)
+2. Paste a YouTube or article URL, or upload a file (`.txt`, `.md`, `.pdf`, `.epub`, `.docx` — any non-YouTube `http(s)` URL is treated as a web article; the main text is extracted with [trafilatura](https://trafilatura.readthedocs.io/), skipping navigation, ads, and comments)
 3. Review the verdict, overlapping notes, and novel snippets
 4. Edit the proposed atomic notes (one concept per note, with source location)
 5. Select notes and click **Write selected to vault**
@@ -188,6 +188,13 @@ preferred languages. Set comma-separated BCP-47 codes in
 `YOUTUBE_TRANSCRIPT_LANGUAGES` (for example `ru,en`). The loader tries each code
 in order, then falls back to the first transcript YouTube exposes when none of
 your preferences match.
+
+### PDF extraction quality
+
+Text-based PDFs work well; scanned PDFs and complex layouts often extract poorly.
+When extraction looks unreliable (sparse pages or garbled words), the analyze
+stream emits a warning so you can treat novelty verdicts with caution. There is
+no OCR fallback yet.
 
 It also drops **low-value blocks** detected structurally — link/URL dumps,
 citation-marker lists (`[17] http://…[18] http://…`), and export watermarks
@@ -386,7 +393,7 @@ app/
   suggest.py         # draft + apply notes
   note_output.py     # note path patterns + append helpers
   vault_watcher.py   # debounced index-on-save
-  sources/           # YouTube, web article, PDF, text loaders
+  sources/           # YouTube, web article, PDF, EPUB, DOCX, text loaders
   main.py            # FastAPI app
 obsidian-plugin/     # Obsidian thin client (optional)
 frontend/

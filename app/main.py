@@ -314,6 +314,9 @@ def _iter_analyze_events(
         if normalized_vault_note and source.source_type == "markdown":
             source.source_ref = normalized_vault_note
 
+        for warning in source.load_warnings:
+            yield {"type": "warning", "message": warning}
+
         checkpoint = SuggestionCheckpoint.for_source(source.source_type, source.source_ref)
 
         resume_suggestions: list[dict] | None = None

@@ -14,6 +14,7 @@ from app.sources.base import (
     SourceLocation,
     SourceSegment,
 )
+from app.sources.pdf_quality import assess_pdf_extraction_quality
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ class PdfLoader(SourceLoader):
 
     def load_from_path(self, path: Path) -> LoadedSource:
         reader = PdfReader(str(path))
+        page_count = len(reader.pages)
         segments: list[SourceSegment] = []
         media: list[MediaItem] = []
 
@@ -48,6 +50,11 @@ class PdfLoader(SourceLoader):
             media = merge_table_captions(media)
 
         content = "\n\n".join(segment.text for segment in segments)
+        load_warnings = assess_pdf_extraction_quality(
+            page_count=page_count,
+            pages_with_text=len(segments),
+            text=content,
+        )
         return LoadedSource(
             title=path.stem,
             text=content,
@@ -55,6 +62,7 @@ class PdfLoader(SourceLoader):
             source_ref=str(path),
             segments=segments,
             media=media,
+            load_warnings=load_warnings,
         )
 
     def _extract_tables(self, path: Path) -> list[MediaItem]:

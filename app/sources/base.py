@@ -122,6 +122,7 @@ class LoadedSource:
     media: list[MediaItem] = field(default_factory=list)
     wikilinks: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
+    load_warnings: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.segments and self.text.strip():
