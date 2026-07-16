@@ -24,23 +24,45 @@ pip install -r requirements.txt
 # Optional: copy and edit environment variables
 cp .env.example .env
 
-# Run the app
-uvicorn app.main:app --reload
+# Run the app (always use the project virtualenv — not Anaconda/base Python)
+.venv/bin/uvicorn app.main:app --reload
+# or: ./scripts/run_dev_server.sh
 ```
 
 Open http://127.0.0.1:8000
 
-The UI loads Tailwind and vis-network from `frontend/vendor/` (no CDN), so it works offline once dependencies are installed.
+### Troubleshooting: `google.protobuf` / `FieldDescriptor` ImportError
 
-For development (unit tests):
+If startup fails with a protobuf circular-import error, the server is using a broken
+global Python (common with Anaconda) instead of this project's `.venv`. The project
+virtualenv installs a compatible `protobuf` pin for ChromaDB.
 
 ```bash
+cd /path/to/knowledge_database_actualizer
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+.venv/bin/uvicorn app.main:app --reload
+```
+
+Do **not** run `uvicorn` from `anaconda3/bin` unless you have repaired protobuf there.
+
+The UI loads Tailwind and vis-network from `frontend/vendor/` (no CDN), so it works offline once dependencies are installed.
+
+For development (unit tests), use an isolated virtual environment so pytest does
+not pick up incompatible packages from a global Anaconda install:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements-dev.txt
 pytest tests/
+node --test frontend/app-core.test.js
+npm --prefix obsidian-plugin test
 ```
 
 `scripts/smoke_test.py` remains an optional heavier integration check (real MiniLM
-download). CI runs the hermetic `tests/` suite only.
+download). CI runs the hermetic `tests/` suite and the client contract tests.
 
 ## Workflow
 
@@ -55,7 +77,8 @@ download). CI runs the hermetic `tests/` suite only.
 
 Notes are drafted one at a time (one LLM call each), so a long run can be
 interrupted by an LLM rate limit or a restart. Every note is saved to a
-checkpoint (`data/checkpoints/latest.json`) the moment it is created:
+checkpoint (`data/checkpoints/<source-key>.json`, tracked in
+`data/checkpoints/manifest.json`) the moment it is created:
 
 - A rate-limited note is retried with exponential backoff (`LLM_MAX_RETRIES`,
   `LLM_RETRY_BASE_DELAY`, `LLM_RETRY_MAX_DELAY`), since rate limits are usually
@@ -108,9 +131,30 @@ See `.env.example` for:
 - `NOTE_OUTPUT_FOLDER`, `NOTE_OUTPUT_LAYOUT`, `NOTE_OUTPUT_PATTERN` — where new atomic notes are written (see [Vault workflow](#vault-workflow-phase-d))
 - `VAULT_WATCH_ENABLED`, `VAULT_WATCH_DEBOUNCE_SECONDS` — automatic re-index on vault saves
 - `ANALYZE_IN_PLACE_ENABLED` — append to the analyzed note when overlap targets it
+- `MAX_UPLOAD_MB` — reject oversized uploads before buffering (default `50`; `0` = unlimited)
 - `YOUTUBE_TRANSCRIPT_LANGUAGES` — BCP-47 codes tried in order for YouTube transcripts (default `en,en-US,en-GB`); falls back to any available language when none match
 
 **Important:** Gemini chat models (e.g. `gemini-2.0-flash`) belong in `LLM_MODEL`, not `EMBEDDING_MODEL`. For Gemini embeddings use `EMBEDDING_PROVIDER=gemini` and `EMBEDDING_MODEL=gemini-embedding-001`.
+
+### Production deployment
+
+For anything beyond local development:
+
+- Do **not** use `--reload`; run a single worker process behind localhost or a reverse proxy.
+- Set `API_TOKEN`, a sensible `MAX_UPLOAD_MB`, and expand `ALLOWED_HOSTS` only when serving beyond loopback.
+- Mount persistent `DATA_DIR` and read-only `VAULT_PATH` volumes when containerizing.
+
+```bash
+# Docker
+docker compose up --build
+
+# systemd (example unit in deploy/knowledge-database-actualizer.service)
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+The web UI and Obsidian plugin both write through `POST /api/suggestions/apply-batch`
+so server-side `.bak` backups, atomic writes, block references, and append merge
+logic stay canonical.
 
 Recommended novelty thresholds (starting points — tune on your vault):
 
@@ -343,7 +387,8 @@ releases.
 - `POST /api/vault/watch` `{ "enabled": true|false }` — enable or disable index-on-save
 - `GET /api/vault/graph`
 - `GET /api/vault/note?note_path=...` — read an existing note (append diff preview)
-- `POST /api/sources/analyze` (multipart: `url` or `file`; optional `resume`, `vault_note_path`) — streams NDJSON progress, `warning`, and `result` events
+- `POST /api/sources/analyze` (multipart: `url` or `file`; optional `resume`, `vault_note_path`, `vault_path`) — streams NDJSON progress, `warning`, and `result` events
+- `POST /api/suggestions/preview` — exact merged note content before write (append or overwrite)
 - `GET /api/suggestions/checkpoint` — the last run's saved notes (crash/rate-limit recovery)
 - `POST /api/suggestions/apply` `{ "note_path", "content", "mode": "write|append", "overwrite": false, "append_heading": null }` — also re-indexes written notes; `append_heading` inserts under a matching `##` section when mode is `append`
 - `POST /api/suggestions/apply-batch` `{ "notes": [{ "note_path", "content", "mode", "overwrite", "append_heading" }] }` — returns per-note `results`, `written_paths`, `skipped_existing`, `errors`, and `index_refresh`
@@ -369,7 +414,7 @@ are reported on index — use a path-qualified link for those.
 
 - **Open in Obsidian:** set `OBSIDIAN_VAULT_NAME` in `.env` for `obsidian://open` links in the web UI overlap list.
 - **Vault templates:** with `USE_OBSIDIAN_TEMPLATES=true` (default), the server reads your vault's template folder from `.obsidian/app.json` and applies `{{body}}`, `{{title}}`, and common Templater tags.
-- **Obsidian plugin:** see [`obsidian-plugin/README.md`](obsidian-plugin/README.md) — analyze, index, recover/continue checkpoints, edit drafts, append preview, analyze-in-place (`vault_note_path`), and write via the API (sidebar parity with the web UI).
+- **Obsidian plugin:** see [`obsidian-plugin/README.md`](obsidian-plugin/README.md) — analyze, index, recover/continue checkpoints, edit drafts, canonical merged-note preview, analyze-in-place (`vault_note_path`), and write via `POST /api/suggestions/apply-batch` (same safety semantics as the web UI).
 
 ## Quality & intelligence (Phase 4)
 

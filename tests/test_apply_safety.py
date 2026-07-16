@@ -131,6 +131,92 @@ def test_apply_batch_accepts_vault_path_from_request(client: TestClient, tmp_pat
     assert (vault / "sources/demo/hello.md").is_file()
 
 
+def test_request_vault_path_does_not_mutate_global_settings(
+    client: TestClient,
+    tmp_path: Path,
+):
+    from app.config import settings
+
+    vault = tmp_path / "request-vault"
+    vault.mkdir()
+    note = vault / "existing.md"
+    note.write_text("existing\n", encoding="utf-8")
+
+    response = client.get(
+        "/api/vault/note",
+        params={"vault_path": str(vault), "note_path": "existing.md"},
+    )
+    assert response.status_code == 200
+    assert settings.vault_path is None
+
+
+def test_preview_returns_exact_content_apply_will_write(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import app.main as main_module
+
+    vault = tmp_path / "preview-vault"
+    vault.mkdir()
+    target = vault / "topic.md"
+    target.write_text("# Topic\n\n## Details\n\nOld text.\n", encoding="utf-8")
+    monkeypatch.setattr(main_module, "_refresh_written_notes", lambda *_args: {})
+    payload = {
+        "vault_path": str(vault),
+        "note_path": "topic.md",
+        "content": "---\ntags: [new]\n---\nFresh information.\n",
+        "mode": "append",
+        "append_heading": "Details",
+    }
+
+    preview_response = client.post("/api/suggestions/preview", json=payload)
+    assert preview_response.status_code == 200, preview_response.text
+    preview = preview_response.json()
+    assert preview["exists"] is True
+    assert preview["existing_content"].startswith("# Topic")
+
+    apply_response = client.post("/api/suggestions/apply", json=payload)
+    assert apply_response.status_code == 200, apply_response.text
+    assert target.read_text(encoding="utf-8") == preview["final_content"]
+
+
+def test_preview_rejects_path_traversal(client: TestClient, tmp_path: Path):
+    vault = tmp_path / "preview-vault"
+    vault.mkdir()
+    response = client.post(
+        "/api/suggestions/preview",
+        json={
+            "vault_path": str(vault),
+            "note_path": "../outside.md",
+            "content": "nope",
+            "mode": "write",
+        },
+    )
+    assert response.status_code == 400
+
+
+def test_preview_reflects_write_that_apply_would_skip(client: TestClient, tmp_path: Path):
+    vault = tmp_path / "preview-vault"
+    vault.mkdir()
+    target = vault / "existing.md"
+    target.write_text("keep me\n", encoding="utf-8")
+    response = client.post(
+        "/api/suggestions/preview",
+        json={
+            "vault_path": str(vault),
+            "note_path": "existing.md",
+            "content": "replacement\n",
+            "mode": "write",
+            "overwrite": False,
+        },
+    )
+    assert response.status_code == 200
+    preview = response.json()
+    assert preview["will_write"] is False
+    assert preview["final_content"] == preview["existing_content"] == "keep me\n"
+
+
 def test_apply_batch_keeps_writes_when_index_refresh_fails(
     client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

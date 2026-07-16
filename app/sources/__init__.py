@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.source_identity import upload_source_key
 from app.sources.base import LoadedSource
-from app.sources.pdf import PdfLoader
 from app.sources.docx import DocxLoader
 from app.sources.epub import EpubLoader
+from app.sources.pdf import PdfLoader
 from app.sources.text import TextLoader
 from app.sources.web import WebArticleLoader
 from app.sources.youtube import YouTubeLoader
+from app.url_security import validate_public_url
 
 
 class SourceDispatcher:
@@ -25,7 +27,7 @@ class SourceDispatcher:
         raise ValueError(f"Unsupported file type: {path.suffix}")
 
     def load_from_url(self, url: str) -> LoadedSource:
-        url = url.strip()
+        url = validate_public_url(url)
         for loader in self.url_loaders:
             if loader.supports_url(url):
                 return loader.load_from_url(url)
@@ -45,6 +47,7 @@ class SourceDispatcher:
             # the temp-file identity for the original upload name.
             loaded.title = Path(filename).stem
             loaded.source_ref = filename
+            loaded.source_key = upload_source_key(filename, content)
             return loaded
         finally:
             tmp_path.unlink(missing_ok=True)

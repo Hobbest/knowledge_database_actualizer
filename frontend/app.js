@@ -5,7 +5,10 @@ const vaultWatchToggle = document.getElementById("vaultWatchToggle");
 const statusBox = document.getElementById("statusBox");
 const sourceUrlInput = document.getElementById("sourceUrl");
 const sourceFileInput = document.getElementById("sourceFile");
+const vaultNotePathInput = document.getElementById("vaultNotePath");
+const analyzeInPlaceHelp = document.getElementById("analyzeInPlaceHelp");
 const analyzeBtn = document.getElementById("analyzeBtn");
+const cancelAnalyzeBtn = document.getElementById("cancelAnalyzeBtn");
 const analyzeError = document.getElementById("analyzeError");
 const resultsSection = document.getElementById("resultsSection");
 const verdictBadge = document.getElementById("verdictBadge");
@@ -43,6 +46,22 @@ const warningsBox = document.getElementById("warningsBox");
 const tagOverlapBox = document.getElementById("tagOverlapBox");
 const tagOverlapList = document.getElementById("tagOverlapList");
 const sourceMeta = document.getElementById("sourceMeta");
+const analysisConfig = document.getElementById("analysisConfig");
+const authDialog = document.getElementById("authDialog");
+const authForm = document.getElementById("authForm");
+const authCancelBtn = document.getElementById("authCancelBtn");
+const apiTokenInput = document.getElementById("apiTokenInput");
+const authError = document.getElementById("authError");
+const {
+  buildAnalyzeFormData,
+  buildPreviewPayload,
+  escapeHtml,
+  isAbortError,
+  markdownToSafeHtml,
+  readNdjsonResponse,
+  sourceInputState,
+  validateSourceInput,
+} = KdaWebCore;
 
 let graphNetwork = null;
 let currentSuggestions = [];
@@ -50,6 +69,9 @@ let currentPage = 1;
 let pageSize = 10;
 let obsidianVaultName = null;
 let obsidianUriEnabled = false;
+let latestStatus = null;
+let activeAnalyzeController = null;
+let pendingAuthRequest = null;
 const API_TOKEN_KEY = "actualizer_api_token";
 
 function getApiToken() {
@@ -71,23 +93,58 @@ function withAuthHeaders(options = {}) {
 async function ensureApiToken(authRequired) {
   if (!authRequired && !getApiToken()) return;
   if (getApiToken()) return;
-  const entered = window.prompt("API token required (Authorization Bearer). Leave blank to cancel:");
-  if (!entered) throw new Error("API token required");
-  setApiToken(entered.trim());
+  if (pendingAuthRequest) return pendingAuthRequest.promise;
+
+  let resolveRequest;
+  let rejectRequest;
+  const promise = new Promise((resolve, reject) => {
+    resolveRequest = resolve;
+    rejectRequest = reject;
+  });
+  pendingAuthRequest = { promise, resolve: resolveRequest, reject: rejectRequest };
+  authError.classList.add("hidden");
+  authError.textContent = "";
+  apiTokenInput.value = "";
+  authDialog.showModal();
+  requestAnimationFrame(() => apiTokenInput.focus());
+  return promise;
 }
+
+function closeAuthDialog(error = null) {
+  if (!pendingAuthRequest) return;
+  const request = pendingAuthRequest;
+  pendingAuthRequest = null;
+  authDialog.close();
+  if (error) request.reject(error);
+  else request.resolve();
+}
+
+authForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const token = apiTokenInput.value.trim();
+  if (!token) {
+    authError.textContent = "Enter an API token or choose Cancel.";
+    authError.classList.remove("hidden");
+    apiTokenInput.focus();
+    return;
+  }
+  setApiToken(token);
+  closeAuthDialog();
+});
+
+authCancelBtn.addEventListener("click", () => {
+  closeAuthDialog(new Error("API token entry canceled."));
+});
+
+authDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeAuthDialog(new Error("API token entry canceled."));
+});
 
 function verdictClass(verdict) {
   if (verdict === "Already known") return "badge-known";
   if (verdict === "Partially new") return "badge-partial";
   return "badge-novel";
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
 }
 
 // Map streamed stages to a monotonic 0-100% bar so it never jumps backwards.
@@ -112,7 +169,10 @@ function showProgress(event) {
   analyzeProgress.classList.remove("hidden");
   progressLabel.textContent = event.message || "Working...";
   progressCount.textContent = event.total > 0 ? `${event.current}/${event.total}` : "";
-  progressBar.style.width = `${computeProgress(event)}%`;
+  const progress = Math.round(computeProgress(event));
+  progressBar.style.width = `${progress}%`;
+  analyzeProgress.setAttribute("aria-valuenow", String(progress));
+  analyzeProgress.setAttribute("aria-valuetext", progressLabel.textContent);
 }
 
 function beginProgress(message = "Starting analysis...") {
@@ -120,12 +180,16 @@ function beginProgress(message = "Starting analysis...") {
   progressLabel.textContent = message;
   progressCount.textContent = "";
   progressBar.style.width = "2%";
+  analyzeProgress.setAttribute("aria-valuenow", "2");
+  analyzeProgress.setAttribute("aria-valuetext", message);
 }
 
 function resetProgress() {
   progressBar.style.width = "0%";
   progressCount.textContent = "";
   progressLabel.textContent = "Working...";
+  analyzeProgress.setAttribute("aria-valuenow", "0");
+  analyzeProgress.removeAttribute("aria-valuetext");
   analyzeProgress.classList.add("hidden");
 }
 
@@ -159,26 +223,7 @@ async function streamNdjson(url, options, onEvent) {
     throw new Error(detail || response.statusText);
   }
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  const handleLine = (line) => {
-    const trimmed = line.trim();
-    if (trimmed) onEvent(JSON.parse(trimmed));
-  };
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let newlineIndex;
-    while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
-      handleLine(buffer.slice(0, newlineIndex));
-      buffer = buffer.slice(newlineIndex + 1);
-    }
-  }
-  handleLine(buffer);
+  await readNdjsonResponse(response, onEvent, options.signal);
 }
 
 async function fetchJson(url, options = {}) {
@@ -202,6 +247,7 @@ async function fetchJson(url, options = {}) {
 async function loadStatus() {
   try {
     const status = await fetchJson("/api/status");
+    latestStatus = status;
     if (status.auth_required) {
       await ensureApiToken(true);
     }
@@ -219,7 +265,18 @@ async function loadStatus() {
       `Graph: ${status.graph_nodes} nodes / ${status.graph_edges} edges`,
       `Embeddings: ${status.embedding_provider}/${status.embedding_model}`,
       `LLM: ${llmLabel}`,
+      `Analyze in place: ${status.analyze_in_place_enabled ? "enabled" : "disabled"}`,
     ].join(" | ");
+
+    vaultNotePathInput.disabled = !status.analyze_in_place_enabled;
+    if (status.analyze_in_place_enabled) {
+      analyzeInPlaceHelp.textContent =
+        "Enabled by the server. Enter a vault-relative Markdown path to target suggestions to that note.";
+    } else {
+      vaultNotePathInput.value = "";
+      analyzeInPlaceHelp.textContent =
+        "Disabled by the server configuration (ANALYZE_IN_PLACE_ENABLED).";
+    }
 
     if (status.llm_enabled && status.llm_budget) {
       const b = status.llm_budget;
@@ -343,8 +400,8 @@ calibrateBtn.addEventListener("click", async () => {
   }
 });
 
-async function ensureFreshIndex() {
-  const status = await fetchJson("/api/status");
+async function ensureFreshIndex(signal) {
+  const status = await fetchJson("/api/status", { signal });
   const stale = status.stale_note_count || 0;
   if (stale <= 0) {
     return;
@@ -365,43 +422,12 @@ async function ensureFreshIndex() {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ vault_path: vaultPath, if_stale: false }),
+    signal,
   });
   const mode = result.skipped ? "skipped (fresh)" : result.index_mode || "incremental";
   statusBox.textContent = `Re-index (${mode}): ${result.chunk_count ?? result.indexed_chunks ?? "?"} chunks.`;
   await loadStatus();
   resetProgress();
-}
-
-function stripFrontmatter(text) {
-  const raw = String(text || "");
-  if (!raw.trimStart().startsWith("---")) {
-    return raw.trim();
-  }
-  const parts = raw.split("---");
-  if (parts.length >= 3) {
-    return parts.slice(2).join("---").trim();
-  }
-  return raw.trim();
-}
-
-function appendPreviewBody(content) {
-  const body = stripFrontmatter(content);
-  if (!body) {
-    return "";
-  }
-  if (/^#{1,6}\s/m.test(body.trimStart())) {
-    return body;
-  }
-  return `## Update\n\n${body}`;
-}
-
-async function fetchVaultNote(notePath) {
-  const vaultPath = vaultPathInput.value.trim();
-  const params = new URLSearchParams({ note_path: notePath });
-  if (vaultPath) {
-    params.set("vault_path", vaultPath);
-  }
-  return fetchJson(`/api/vault/note?${params.toString()}`);
 }
 
 function setCollapsibleOpen(panel, itemCount) {
@@ -431,6 +457,15 @@ function renderTagOverlap(tags) {
 
 function renderSourceMeta(source) {
   const parts = [];
+  if (source.source_ref) {
+    parts.push(`<div><span class="text-slate-500">Source reference:</span> <span class="break-all">${escapeHtml(source.source_ref)}</span></div>`);
+  }
+  if (source.text_length != null) {
+    parts.push(`<div><span class="text-slate-500">Extracted text:</span> ${Number(source.text_length).toLocaleString()} characters</div>`);
+  }
+  if (source.vault_note_path) {
+    parts.push(`<div><span class="text-slate-500">Analyze-in-place target:</span> <code>${escapeHtml(source.vault_note_path)}</code></div>`);
+  }
   if (source.tags && source.tags.length) {
     parts.push(`<div><span class="text-slate-500">Source tags:</span> ${renderTagBadges(source.tags)}</div>`);
   }
@@ -450,6 +485,28 @@ function renderSourceMeta(source) {
   }
   sourceMeta.classList.remove("hidden");
   sourceMeta.innerHTML = parts.join("");
+}
+
+function renderAnalysisConfig() {
+  if (!latestStatus) {
+    analysisConfig.classList.add("hidden");
+    return;
+  }
+  const thresholds = latestStatus.thresholds || {};
+  const indexMeta = latestStatus.index_meta || {};
+  const activeIndexMeta =
+    indexMeta.multi_vault && indexMeta.active_vault
+      ? indexMeta.vaults?.[indexMeta.active_vault] || {}
+      : indexMeta;
+  const values = [
+    `Novel threshold: ${thresholds.novel ?? "—"}`,
+    `Known threshold: ${thresholds.known ?? "—"}`,
+    `Indexed chunks: ${latestStatus.indexed_chunks ?? "—"}`,
+    activeIndexMeta.chunk_size ? `Chunk size: ${activeIndexMeta.chunk_size}` : null,
+    `Embedding: ${latestStatus.embedding_provider || "—"}/${latestStatus.embedding_model || "—"}`,
+  ].filter(Boolean);
+  analysisConfig.textContent = `Analysis configuration · ${values.join(" · ")}`;
+  analysisConfig.classList.remove("hidden");
 }
 
 function renderObsidianLink(note) {
@@ -496,15 +553,35 @@ function renderNovel(chunks) {
   setCollapsibleOpen(novelPanel, items.length);
 
   if (!items.length) {
-    novelList.innerHTML = "<li class='text-slate-500'>No clearly novel snippets detected.</li>";
+    novelList.innerHTML = "<li class='text-slate-500'>No chunk-level evidence was returned.</li>";
     return;
   }
 
   for (const chunk of items) {
     const li = document.createElement("li");
-    li.className = "border rounded-lg p-2 bg-emerald-50";
-    const preview = chunk.length > 280 ? `${chunk.slice(0, 280)}...` : chunk;
-    li.textContent = preview;
+    const isObject = chunk && typeof chunk === "object";
+    const text = isObject ? chunk.text_preview || "" : String(chunk);
+    const preview = text.length > 420 ? `${text.slice(0, 420)}…` : text;
+    let label = "Novel";
+    let badgeClass = "bg-emerald-100 text-emerald-800";
+    if (isObject && chunk.is_known) {
+      label = "Known";
+      badgeClass = "bg-red-100 text-red-800";
+    } else if (isObject && !chunk.is_novel) {
+      label = "Partial";
+      badgeClass = "bg-amber-100 text-amber-800";
+    }
+    li.className = "border rounded-lg p-3 bg-white space-y-2";
+    li.innerHTML = `
+      <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
+        <span class="font-medium">Chunk ${isObject ? Number(chunk.chunk_index) + 1 : "evidence"}</span>
+        <span class="inline-flex items-center gap-2">
+          ${isObject ? `<span>Best vault similarity: ${escapeHtml(chunk.best_similarity)}</span>` : ""}
+          <span class="px-2 py-0.5 rounded-full ${badgeClass}">${label}</span>
+        </span>
+      </div>
+      <div class="text-slate-700 whitespace-pre-wrap">${escapeHtml(preview)}</div>
+    `;
     novelList.appendChild(li);
   }
 }
@@ -556,6 +633,7 @@ function renderSuggestionsPage() {
     const suggestion = currentSuggestions[index];
     const card = document.createElement("div");
     card.className = "border rounded-lg p-4 space-y-3 bg-slate-50";
+    card.dataset.suggestionCard = String(index);
     const mocBadge = suggestion.is_moc
       ? '<span class="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">MOC</span>'
       : "";
@@ -571,7 +649,7 @@ function renderSuggestionsPage() {
       suggestion.append_target && !suggestion.is_moc
         ? `<div class="space-y-2 rounded-lg border bg-white p-3">
             <div class="text-xs font-medium text-slate-500">Write mode</div>
-            <div class="flex flex-wrap gap-4 text-sm">
+            <div class="flex flex-wrap gap-4 text-sm" role="group" aria-label="Write mode for ${escapeHtml(suggestion.concept_title)}">
               <label class="inline-flex items-center gap-2">
                 <input type="radio" name="write-mode-${index}" value="write" class="write-mode-radio" data-index="${index}" />
                 New file
@@ -582,7 +660,7 @@ function renderSuggestionsPage() {
               </label>
             </div>
             <details class="append-diff-details mt-2">
-              <summary class="text-xs text-indigo-600 cursor-pointer">Preview append diff</summary>
+              <summary class="text-xs text-indigo-600 cursor-pointer">Preview exact merged note</summary>
               <div class="append-diff mt-2 grid md:grid-cols-2 gap-3 text-xs"></div>
             </details>
           </div>`
@@ -603,18 +681,23 @@ function renderSuggestionsPage() {
       ${appendSectionHint}
       ${appendControls}
       <div class="space-y-1">
-        <label class="text-xs font-medium text-slate-500">Vault path</label>
-        <input data-field="note_path" data-index="${index}" class="w-full border rounded-lg px-3 py-2 text-sm bg-white" />
+        <label for="note-path-${index}" class="text-xs font-medium text-slate-500">Vault path</label>
+        <input id="note-path-${index}" data-field="note_path" data-index="${index}" class="w-full border rounded-lg px-3 py-2 text-sm bg-white" />
       </div>
       <div class="space-y-1">
-        <label class="text-xs font-medium text-slate-500">Note content</label>
-        <textarea data-field="content" data-index="${index}" rows="12" class="w-full border rounded-lg px-3 py-2 font-mono text-sm bg-white"></textarea>
+        <label for="note-content-${index}" class="text-xs font-medium text-slate-500">Note content</label>
+        <textarea id="note-content-${index}" data-field="content" data-index="${index}" rows="12" class="w-full border rounded-lg px-3 py-2 font-mono text-sm bg-white"></textarea>
       </div>
+      <details class="rendered-preview-details rounded-lg border bg-white p-3">
+        <summary class="text-sm font-medium text-indigo-700 cursor-pointer">Rendered Markdown preview</summary>
+        <div class="markdown-preview mt-3 border-t pt-2 text-sm"></div>
+      </details>
     `;
 
     card.querySelector(".suggestion-select").checked = suggestion.selected;
     card.querySelector('[data-field="note_path"]').value = suggestion.note_path;
     card.querySelector('[data-field="content"]').value = suggestion.content;
+    card.querySelector(".markdown-preview").innerHTML = markdownToSafeHtml(suggestion.content);
 
     const writeMode = suggestion.write_mode || "write";
     const writeRadio = card.querySelector(`input.write-mode-radio[value="${writeMode}"]`);
@@ -638,6 +721,16 @@ function renderSuggestionsPage() {
       const idx = Number(event.target.dataset.index);
       const field = event.target.dataset.field;
       currentSuggestions[idx][field] = event.target.value;
+      if (field === "content") {
+        const card = event.target.closest("[data-suggestion-card]");
+        const rendered = card?.querySelector(".markdown-preview");
+        if (rendered) rendered.innerHTML = markdownToSafeHtml(event.target.value);
+        const diffDetails = card?.querySelector(".append-diff-details");
+        if (diffDetails?.open && currentSuggestions[idx].write_mode === "append") {
+          clearTimeout(currentSuggestions[idx]._previewTimer);
+          currentSuggestions[idx]._previewTimer = setTimeout(() => refreshAppendDiff(idx), 250);
+        }
+      }
     });
   });
 
@@ -677,7 +770,7 @@ function renderSuggestionsPage() {
       if (!event.target.open) {
         return;
       }
-      const card = event.target.closest(".border");
+      const card = event.target.closest("[data-suggestion-card]");
       const idx = Number(card?.querySelector("[data-index]")?.dataset.index);
       if (!Number.isNaN(idx)) {
         await refreshAppendDiff(idx);
@@ -702,37 +795,55 @@ async function refreshAppendDiff(index) {
     return;
   }
   const pathInput = suggestionsList.querySelector(`[data-field="note_path"][data-index="${index}"]`);
-  const card = pathInput?.closest(".border");
+  const card = pathInput?.closest("[data-suggestion-card]");
   const diffHost = card?.querySelector(".append-diff");
   if (!diffHost) {
     return;
   }
-  diffHost.innerHTML = "<div class='text-slate-500 col-span-2'>Loading existing note...</div>";
+  const requestId = (suggestion._previewRequestId || 0) + 1;
+  suggestion._previewRequestId = requestId;
+  diffHost.innerHTML = "<div class='text-slate-500 col-span-2' role='status'>Loading canonical preview…</div>";
   try {
-    const existing = await fetchVaultNote(suggestion.append_target);
-    const proposed = appendPreviewBody(suggestion.content);
-    const existingBody = existing.exists
-      ? stripFrontmatter(existing.content)
-      : "(note not found — will be created as a new file)";
+    const payload = buildPreviewPayload(suggestion, vaultPathInput.value);
+    const preview = await fetchJson("/api/suggestions/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (suggestion._previewRequestId !== requestId) return;
+    const existingContent = preview.exists
+      ? preview.existing_content
+      : "(note not found — the final content below will create it)";
+    const writeStatus = preview.will_write
+      ? "This is the exact content the apply API will write."
+      : "The apply API would not write this change with the current options.";
     diffHost.innerHTML = `
       <div class="space-y-1">
-        <div class="font-medium text-slate-600">Existing</div>
-        <pre class="border rounded p-2 bg-slate-50 whitespace-pre-wrap max-h-48 overflow-auto">${escapeHtml(existingBody)}</pre>
+        <div class="font-medium text-slate-600">Existing note context</div>
+        <pre class="border rounded p-2 bg-slate-50 whitespace-pre-wrap max-h-64 overflow-auto">${escapeHtml(existingContent)}</pre>
       </div>
       <div class="space-y-1">
-        <div class="font-medium text-slate-600">Will append</div>
-        <pre class="border rounded p-2 bg-emerald-50 whitespace-pre-wrap max-h-48 overflow-auto">${escapeHtml(proposed)}</pre>
+        <div class="font-medium text-slate-600">Exact final merged content</div>
+        <pre class="border rounded p-2 bg-emerald-50 whitespace-pre-wrap max-h-64 overflow-auto">${escapeHtml(preview.final_content)}</pre>
       </div>
+      <div class="col-span-2 text-slate-600">${escapeHtml(writeStatus)}</div>
+      <details class="col-span-2 rounded border bg-white p-2">
+        <summary class="font-medium text-indigo-700 cursor-pointer">Rendered final note</summary>
+        <div class="markdown-preview mt-2 border-t pt-2">${markdownToSafeHtml(preview.final_content)}</div>
+      </details>
     `;
   } catch (error) {
+    if (suggestion._previewRequestId !== requestId) return;
     diffHost.innerHTML = `<div class="text-red-600 col-span-2">${escapeHtml(error.message)}</div>`;
   }
 }
 
 function renderGraph(graphData) {
   const container = document.getElementById("graph");
+  const textContainer = document.getElementById("graphText");
   if (!graphData || !graphData.nodes || !graphData.nodes.length) {
     container.innerHTML = "<p class='text-sm text-slate-500 p-4'>No graph data available. Index your vault first.</p>";
+    textContainer.innerHTML = "<p>No graph nodes or links are available.</p>";
     return;
   }
 
@@ -763,6 +874,24 @@ function renderGraph(graphData) {
     graphNetwork.destroy();
   }
   graphNetwork = new vis.Network(container, data, options);
+
+  const labelById = new Map(graphData.nodes.map((node) => [node.id, node.label || node.id]));
+  const highlighted = graphData.nodes.filter((node) => node.highlighted);
+  const nodeSummary = highlighted.length
+    ? `<p><strong>Related notes:</strong> ${highlighted.map((node) => escapeHtml(node.label || node.id)).join(", ")}</p>`
+    : `<p>${graphData.nodes.length} notes are shown; none are specifically highlighted.</p>`;
+  const edgesList = (graphData.edges || [])
+    .map((edge) => {
+      const from = labelById.get(edge.from) || edge.from;
+      const to = labelById.get(edge.to) || edge.to;
+      return `<li>${escapeHtml(from)} links to ${escapeHtml(to)}</li>`;
+    })
+    .join("");
+  textContainer.innerHTML =
+    nodeSummary +
+    (edgesList
+      ? `<p class="mt-2 font-medium">Links (${graphData.edges.length})</p><ul class="list-disc ml-5 mt-1 max-h-64 overflow-auto">${edgesList}</ul>`
+      : "<p class='mt-2'>No links between these notes.</p>");
 }
 
 function renderResult(result) {
@@ -776,49 +905,108 @@ function renderResult(result) {
   sourceType.textContent = `${result.source.source_type} (${result.source.segment_count} segments)`;
 
   renderSourceMeta(result.source || {});
+  renderAnalysisConfig();
   renderTagOverlap(result.novelty.tag_overlap || []);
   renderOverlap(result.novelty.overlapping_notes || []);
-  renderNovel(result.novelty.novel_chunks || []);
+  renderNovel(result.novelty.chunk_results || result.novelty.novel_chunks || []);
   renderSuggestions(result.suggestions || []);
   renderWarnings(result.warnings || []);
   renderGraph(result.graph);
 
+  resultsSection.focus({ preventScroll: true });
   resultsSection.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-async function runAnalysis({ resume = false } = {}) {
-  analyzeError.classList.add("hidden");
-  analyzeBtn.disabled = true;
-  continueBtn.disabled = true;
-  analyzeBtn.textContent = resume ? "Continuing..." : "Analyzing...";
+function syncSourceInputs() {
+  const state = sourceInputState({
+    url: sourceUrlInput.value,
+    file: sourceFileInput.files[0],
+  });
+  sourceUrlInput.disabled = state.urlDisabled;
+  sourceFileInput.disabled = state.fileDisabled;
+}
+
+function clearAnalysisResults() {
+  resultsSection.classList.add("hidden");
+  currentSuggestions = [];
+  currentPage = 1;
   applyMessage.textContent = "";
   renderWarnings([]);
+  if (graphNetwork) {
+    graphNetwork.destroy();
+    graphNetwork = null;
+  }
+}
+
+function setAnalyzing(isRunning, resume = false) {
+  analyzeBtn.disabled = isRunning;
+  continueBtn.disabled = isRunning;
+  recoverBtn.disabled = isRunning;
+  sourceUrlInput.disabled = isRunning || sourceInputState({
+    url: sourceUrlInput.value,
+    file: sourceFileInput.files[0],
+  }).urlDisabled;
+  sourceFileInput.disabled = isRunning || sourceInputState({
+    url: sourceUrlInput.value,
+    file: sourceFileInput.files[0],
+  }).fileDisabled;
+  vaultNotePathInput.disabled =
+    isRunning || latestStatus?.analyze_in_place_enabled === false;
+  analyzeBtn.textContent = isRunning ? (resume ? "Continuing…" : "Analyzing…") : "Analyze";
+  cancelAnalyzeBtn.classList.toggle("hidden", !isRunning);
+  cancelAnalyzeBtn.disabled = false;
+  cancelAnalyzeBtn.textContent = "Cancel analysis";
+  if (!isRunning) syncSourceInputs();
+}
+
+async function runAnalysis({ resume = false } = {}) {
+  if (activeAnalyzeController) return;
+  analyzeError.classList.add("hidden");
+  analyzeError.textContent = "";
+  clearAnalysisResults();
+  const controller = new AbortController();
+  activeAnalyzeController = controller;
+  setAnalyzing(true, resume);
   beginProgress(resume ? "Continuing interrupted run..." : "Starting analysis...");
 
   try {
     if (!resume) {
-      await ensureFreshIndex();
+      await ensureFreshIndex(controller.signal);
     }
-    const formData = new FormData();
     const url = sourceUrlInput.value.trim();
     const file = sourceFileInput.files[0];
-
-    if (!url && !file) {
-      throw new Error(
-        resume
-          ? "Re-select the same source (URL or file) to continue the interrupted run."
-          : "Provide a URL or upload a file."
-      );
+    const validation = validateSourceInput({ url, file });
+    if (!validation.valid) {
+      if (resume && !url && !file) {
+        throw new Error("Re-select the same source (URL or file) to continue the interrupted run.");
+      }
+      throw new Error(validation.message);
     }
-    if (url) formData.append("url", url);
-    if (file) formData.append("file", file);
-    if (resume) formData.append("resume", "true");
+    const vaultNotePath = vaultNotePathInput.value.trim();
+    if (
+      vaultNotePath &&
+      (vaultNotePath.startsWith("/") ||
+        /^[a-zA-Z]:[\\/]/.test(vaultNotePath) ||
+        vaultNotePath.includes("\\") ||
+        vaultNotePath.split(/[\\/]+/).includes("..") ||
+        !vaultNotePath.toLowerCase().endsWith(".md"))
+    ) {
+      throw new Error("Existing vault note path must be a vault-relative Markdown (.md) path.");
+    }
+    const formData = buildAnalyzeFormData({
+      url,
+      file,
+      resume,
+      vaultNotePath:
+        latestStatus?.analyze_in_place_enabled === false ? "" : vaultNotePath,
+      vaultPath: vaultPathInput.value,
+    });
 
     let streamError = null;
     const liveWarnings = [];
     await streamNdjson(
       "/api/sources/analyze",
-      { method: "POST", body: formData },
+      { method: "POST", body: formData, signal: controller.signal },
       (event) => {
         if (event.type === "progress") {
           showProgress(event);
@@ -844,12 +1032,18 @@ async function runAnalysis({ resume = false } = {}) {
 
     if (streamError) throw streamError;
   } catch (error) {
-    analyzeError.textContent = error.message;
+    if (isAbortError(error) || controller.signal.aborted) {
+      clearAnalysisResults();
+      analyzeError.textContent = "Analysis canceled. No results from the canceled run are shown.";
+    } else {
+      analyzeError.textContent = error.message;
+    }
     analyzeError.classList.remove("hidden");
+    analyzeError.focus?.();
   } finally {
+    if (activeAnalyzeController === controller) activeAnalyzeController = null;
     resetProgress();
-    analyzeBtn.disabled = false;
-    analyzeBtn.textContent = "Analyze";
+    setAnalyzing(false);
     // The run either finished (checkpoint completed) or failed again; refresh
     // the Continue button to reflect the latest checkpoint state.
     refreshResumeState();
@@ -877,10 +1071,21 @@ async function refreshResumeState() {
 
 analyzeBtn.addEventListener("click", () => runAnalysis({ resume: false }));
 continueBtn.addEventListener("click", () => runAnalysis({ resume: true }));
+cancelAnalyzeBtn.addEventListener("click", () => {
+  if (!activeAnalyzeController) return;
+  cancelAnalyzeBtn.disabled = true;
+  cancelAnalyzeBtn.textContent = "Canceling…";
+  if (pendingAuthRequest) {
+    closeAuthDialog(new DOMException("Analysis canceled", "AbortError"));
+  }
+  activeAnalyzeController.abort(new DOMException("Analysis canceled", "AbortError"));
+});
+sourceUrlInput.addEventListener("input", syncSourceInputs);
+sourceFileInput.addEventListener("change", syncSourceInputs);
 
 recoverBtn.addEventListener("click", async () => {
   analyzeError.classList.add("hidden");
-  applyMessage.textContent = "";
+  clearAnalysisResults();
   recoverBtn.disabled = true;
 
   try {
@@ -899,6 +1104,9 @@ recoverBtn.addEventListener("click", async () => {
     sourceTitle.textContent = (data.source && data.source.title) || "(recovered run)";
     sourceType.textContent = (data.source && data.source.source_type) || "";
 
+    renderSourceMeta(data.source || {});
+    renderAnalysisConfig();
+    renderTagOverlap([]);
     renderOverlap([]);
     renderNovel([]);
     renderSuggestions(saved);
@@ -909,6 +1117,7 @@ recoverBtn.addEventListener("click", async () => {
       ...(data.warnings || []),
       `Recovered ${saved.length} saved note(s) from the last ${status}.`,
     ]);
+    resultsSection.focus({ preventScroll: true });
     resultsSection.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) {
     analyzeError.textContent = error.message;
@@ -1104,5 +1313,6 @@ if (vaultWatchToggle) {
   });
 }
 
+syncSourceInputs();
 loadStatus();
 refreshResumeState();

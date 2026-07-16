@@ -28,6 +28,12 @@ class DocxLoader(SourceLoader):
         for message in result.messages:
             logger.debug("DOCX conversion message for %s: %s", path, message)
 
+        load_warnings = [
+            f"DOCX conversion warning: {message}"
+            for message in result.messages
+            if str(message).strip()
+        ]
+
         raw_lines = markdown.splitlines()
         segments = segments_from_markdown(raw_lines)
         if not segments:
@@ -41,4 +47,5 @@ class DocxLoader(SourceLoader):
             source_type="docx",
             source_ref=str(path),
             segments=segments,
+            load_warnings=load_warnings,
         )

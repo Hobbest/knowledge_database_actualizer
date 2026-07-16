@@ -37,6 +37,7 @@ def test_supports_only_non_youtube_http_urls():
 
 def test_dispatcher_routes_generic_urls_to_web_loader(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("app.sources.web.fetch_html", lambda url: ARTICLE_HTML)
+    monkeypatch.setattr("app.sources.validate_public_url", lambda url: url)
     dispatcher = SourceDispatcher()
     source = dispatcher.load_from_url("https://example.com/post?utm_source=x#section")
 

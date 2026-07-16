@@ -3,6 +3,7 @@ and oversized uploads are rejected before any work starts."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -10,6 +11,7 @@ from queue import Queue
 
 import pytest
 from app.config import settings
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 
@@ -88,6 +90,24 @@ def test_upload_over_limit_is_rejected(client: TestClient, monkeypatch: pytest.M
     assert "MAX_UPLOAD_MB" in response.json()["detail"]
 
 
+def test_upload_reader_stops_after_first_over_limit_chunk():
+    from app.main import _read_upload_bounded
+
+    class ChunkedUpload:
+        def __init__(self):
+            self.reads = 0
+
+        async def read(self, _size: int) -> bytes:
+            self.reads += 1
+            return b"x" * (1024 * 1024) if self.reads <= 3 else b""
+
+    upload = ChunkedUpload()
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(_read_upload_bounded(upload, 1))  # type: ignore[arg-type]
+    assert exc_info.value.status_code == 413
+    assert upload.reads == 2
+
+
 def test_upload_limit_zero_means_unlimited(client: TestClient, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(settings, "max_upload_mb", 0)
     big = b"# Note\n\nBody text here.\n" * 100
@@ -127,6 +147,7 @@ def test_analyze_web_url_streams_ndjson_end_to_end(
     from tests.test_web_loader import ARTICLE_HTML
 
     monkeypatch.setattr("app.sources.web.fetch_html", lambda url: ARTICLE_HTML)
+    monkeypatch.setattr("app.sources.validate_public_url", lambda url: url)
 
     with client.stream(
         "POST",

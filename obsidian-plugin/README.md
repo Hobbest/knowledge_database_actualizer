@@ -8,6 +8,7 @@ Thin client for the Knowledge Database Actualizer API. Keeps the Python server a
 2. Copy this folder into your vault's plugins directory:
    - **From repo:** copy `obsidian-plugin/` to `<vault>/.obsidian/plugins/knowledge-database-actualizer/`
    - **Required files:** `manifest.json`, `main.js`, `styles.css`, `versions.json`
+   - `core.js` is used only for Node contract tests; Obsidian loads `main.js` alone.
 3. Enable **Knowledge Database Actualizer** under Community plugins.
 4. Open **Settings → Knowledge Database Actualizer** and set:
    - **API base URL** — default `http://127.0.0.1:8000`
@@ -34,8 +35,10 @@ The sidebar mirrors the web UI essentials:
 - **Overlapping vault notes** with similarity, heading, and excerpt
 - **Editable vault path and note content** before write
 - **Append vs new file** when a topic matches an existing note
-- **Append diff preview** via `GET /api/vault/note`
-- **Write selected** via `/api/suggestions/apply-batch`, then optionally open written notes
+- **Exact merged-note preview** via `POST /api/suggestions/preview`
+- **Write selected** via `/api/suggestions/apply-batch`, including server backups, atomic writes,
+  block references, index refresh, and optional opening of written notes
+- **Vault watch and threshold calibration** controls beside the index action
 
 ## Community plugin submission
 

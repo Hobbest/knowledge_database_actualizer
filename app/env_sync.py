@@ -328,7 +328,7 @@ def default_value_for_field(field_name: str) -> str:
     field = Settings.model_fields[field_name]
     value = field.default
     if value is None and field.default_factory is not None:
-        value = field.default_factory()  # type: ignore[misc]
+        value = field.get_default(call_default_factory=True)
     if value is None:
         return ""
     if isinstance(value, bool):

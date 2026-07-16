@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from hashlib import sha256
 from pathlib import Path
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 
@@ -95,6 +96,13 @@ def normalize_source_key(source_type: str | None, source_ref: str | None) -> str
         return path.as_posix()
     except Exception:
         return ref
+
+
+def upload_source_key(filename: str, content: bytes) -> str:
+    """Content-stable upload identity with a human-useful filename suffix."""
+    digest = sha256(content).hexdigest()
+    safe_name = Path(filename or "upload").name.replace(":", "_")
+    return f"upload:sha256:{digest}:{safe_name}"
 
 
 def canonical_youtube_url(video_id: str) -> str:

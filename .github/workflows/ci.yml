@@ -43,3 +43,8 @@ jobs:
           LLM_API_KEY: ""
           LLM_MODEL: ""
           API_TOKEN: ""
+
+      - name: Client contract tests
+        run: |
+          node --test frontend/app-core.test.js
+          npm --prefix obsidian-plugin test

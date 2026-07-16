@@ -159,8 +159,14 @@ class SuggestionCheckpoint:
         }
 
     @classmethod
-    def for_source(cls, source_type: str, source_ref: str) -> SuggestionCheckpoint:
-        key = normalize_source_key(source_type, source_ref)
+    def for_source(
+        cls,
+        source_type: str,
+        source_ref: str,
+        *,
+        source_key: str | None = None,
+    ) -> SuggestionCheckpoint:
+        key = source_key or normalize_source_key(source_type, source_ref)
         return cls(source_key=key)
 
     def start(self, source: dict | None) -> None:
@@ -250,10 +256,12 @@ def _load_checkpoint_file(path: Path) -> dict | None:
 def load_checkpoint_for_source(
     source_type: str | None,
     source_ref: str | None,
+    *,
+    source_key: str | None = None,
 ) -> dict | None:
     """Load the checkpoint for a specific source, if any."""
     _ensure_migrated()
-    key = normalize_source_key(source_type, source_ref)
+    key = source_key or normalize_source_key(source_type, source_ref)
     if not key:
         return None
     return _load_checkpoint_file(checkpoint_path_for(key))
@@ -311,6 +319,7 @@ def checkpoint_matches_source(
     source_ref: str,
     *,
     source_type: str | None = None,
+    source_key: str | None = None,
 ) -> bool:
     """True when a saved checkpoint was produced from the same source."""
     if not checkpoint:
@@ -320,5 +329,5 @@ def checkpoint_matches_source(
         source.get("source_type"),
         source.get("source_ref"),
     )
-    current_key = normalize_source_key(source_type, source_ref)
+    current_key = source_key or normalize_source_key(source_type, source_ref)
     return bool(current_key) and saved_key == current_key

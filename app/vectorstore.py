@@ -4,19 +4,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import chromadb
-from chromadb.config import Settings as ChromaSettings
-
 from app.chunking import chunk_text
 from app.config import settings
 from app.embeddings import EmbeddingService, embedding_collection_suffix, get_embedding_service
 from app.index_meta import load_index_meta, save_index_meta
+from app.preflight import import_chromadb
 from app.runtime import INDEX_LOCK
 from app.similarity import adjusted_similarity
 from app.vault import VaultNote, embedding_text_for_note, load_note, load_vault
 from app.vault_fingerprints import index_config_changed, note_fingerprint
 from app.vault_index import resolve_vault_meta, vault_collection_token
 from app.wikilinks import WikilinkIndex, build_wikilink_index
+
+chromadb = import_chromadb()
+ChromaSettings = chromadb.config.Settings
 
 COLLECTION_NAME = "vault_chunks"
 

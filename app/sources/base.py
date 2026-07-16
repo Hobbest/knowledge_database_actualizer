@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 class SourceLocation:
     page: int | None = None
     page_end: int | None = None
+    chapter: int | None = None
+    chapter_end: int | None = None
     line_start: int | None = None
     line_end: int | None = None
     timestamp_start: float | None = None
@@ -14,7 +16,12 @@ class SourceLocation:
 
     def display(self) -> str:
         parts: list[str] = []
-        if self.page is not None:
+        if self.chapter is not None:
+            if self.chapter_end and self.chapter_end != self.chapter:
+                parts.append(f"chapters {self.chapter}-{self.chapter_end}")
+            else:
+                parts.append(f"chapter {self.chapter}")
+        elif self.page is not None:
             if self.page_end and self.page_end != self.page:
                 parts.append(f"pages {self.page}-{self.page_end}")
             else:
@@ -38,6 +45,8 @@ class SourceLocation:
         return {
             "page": self.page,
             "page_end": self.page_end,
+            "chapter": self.chapter,
+            "chapter_end": self.chapter_end,
             "line_start": self.line_start,
             "line_end": self.line_end,
             "timestamp_start": self.timestamp_start,
@@ -59,6 +68,10 @@ def merge_locations(locations: list[SourceLocation]) -> SourceLocation:
     if not locations:
         return SourceLocation()
 
+    chapters = [loc.chapter for loc in locations if loc.chapter is not None]
+    chapter_ends = [
+        loc.chapter_end or loc.chapter for loc in locations if loc.chapter is not None
+    ]
     pages = [loc.page for loc in locations if loc.page is not None]
     page_ends = [loc.page_end or loc.page for loc in locations if loc.page is not None]
     line_starts = [loc.line_start for loc in locations if loc.line_start is not None]
@@ -73,6 +86,8 @@ def merge_locations(locations: list[SourceLocation]) -> SourceLocation:
     return SourceLocation(
         page=min(pages) if pages else None,
         page_end=max(page_ends) if page_ends else None,
+        chapter=min(chapters) if chapters else None,
+        chapter_end=max(chapter_ends) if chapter_ends else None,
         line_start=min(line_starts) if line_starts else None,
         line_end=max(line_ends) if line_ends else None,
         timestamp_start=min(ts_starts) if ts_starts else None,
@@ -123,6 +138,7 @@ class LoadedSource:
     wikilinks: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     load_warnings: list[str] = field(default_factory=list)
+    source_key: str | None = None
 
     def __post_init__(self) -> None:
         if not self.segments and self.text.strip():

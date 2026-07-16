@@ -108,6 +108,25 @@ def load_index_meta() -> dict | None:
         return None
 
 
+def active_vault_path() -> Path | None:
+    """Configured vault path or the last indexed vault recorded in metadata."""
+    if settings.vault_path:
+        candidate = settings.vault_path.expanduser().resolve()
+        if candidate.is_dir():
+            return candidate
+
+    meta = load_index_meta()
+    if meta is None:
+        return None
+
+    indexed = meta.get("vault_path")
+    if not indexed:
+        return None
+
+    candidate = Path(indexed).expanduser().resolve()
+    return candidate if candidate.is_dir() else None
+
+
 def stale_note_count(vault_path: Path | None = None) -> int:
     """How many vault notes differ from the last index (0 when unknown)."""
     meta = load_index_meta()
@@ -148,7 +167,7 @@ def collect_index_warnings(*, indexed_chunks: int, vault_path: Path | None = Non
         return warnings
 
     active = vault_path or settings.vault_path
-    vault_meta = resolve_vault_meta(meta, active.resolve()) if active else meta
+    vault_meta = (resolve_vault_meta(meta, active.resolve()) if active else meta) or meta
 
     if vault_meta.get("embedding_provider") != settings.embedding_provider or vault_meta.get(
         "embedding_model"

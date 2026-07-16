@@ -9,6 +9,7 @@ from app.checkpoint import (
     load_latest_checkpoint,
 )
 from app.source_identity import normalize_source_key
+from app.sources import SourceDispatcher
 
 
 def test_normalize_youtube_variants():
@@ -103,3 +104,45 @@ def test_per_source_checkpoints_do_not_overwrite_each_other(tmp_data_dir):
     assert len(incomplete) == 2
     assert load_checkpoint_by_key("source-a.md") is not None
     assert load_latest_checkpoint() is not None
+
+
+def test_upload_checkpoint_identity_uses_content_and_filename(tmp_data_dir):
+    dispatcher = SourceDispatcher()
+    first = dispatcher.load_from_bytes("notes.md", b"# Note\n\nFirst body.\n")
+    same = dispatcher.load_from_bytes("notes.md", b"# Note\n\nFirst body.\n")
+    changed = dispatcher.load_from_bytes("notes.md", b"# Note\n\nChanged body.\n")
+
+    assert first.source_ref == "notes.md"
+    assert first.source_key == same.source_key
+    assert first.source_key != changed.source_key
+    assert first.source_key and first.source_key.endswith(":notes.md")
+
+    checkpoint = SuggestionCheckpoint.for_source(
+        first.source_type,
+        first.source_ref,
+        source_key=first.source_key,
+    )
+    checkpoint.start(
+        {
+            "title": first.title,
+            "source_type": first.source_type,
+            "source_ref": first.source_ref,
+            "source_key": first.source_key,
+        }
+    )
+    checkpoint.add({"note_path": "draft.md", "content": "draft"})
+    checkpoint.finish(completed=False)
+
+    assert load_checkpoint_for_source(
+        same.source_type,
+        same.source_ref,
+        source_key=same.source_key,
+    )
+    assert (
+        load_checkpoint_for_source(
+            changed.source_type,
+            changed.source_ref,
+            source_key=changed.source_key,
+        )
+        is None
+    )

@@ -47,9 +47,8 @@ class Settings(BaseSettings):
     # every distinct concept can become its own atomic note. Lower = more notes.
     segment_target_chars: int = 1200
 
-    # Reject uploads larger than this many megabytes (0 = unlimited). Uploads
-    # are buffered in memory before analysis.
-    max_upload_mb: int = 0
+    # Reject uploads larger than this many megabytes (0 = unlimited).
+    max_upload_mb: int = 50
 
     # Comma-separated BCP-47 language codes for YouTube transcripts (tried in
     # order). When none match, the loader falls back to the first available

@@ -6,11 +6,12 @@ import re
 import shutil
 import tempfile
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from queue import SimpleQueue
+from typing import cast
 
 import yaml
 
@@ -130,6 +131,8 @@ def _infer_note_tags(overlapping_notes: list[OverlappingNote]) -> list[str]:
 def _build_moc_suggestion(
     source: LoadedSource,
     suggestions: list[NoteSuggestion],
+    *,
+    vault_path: Path | None = None,
 ) -> NoteSuggestion:
     concept_notes = [item for item in suggestions if not item.is_moc]
     links = [format_wikilink(item.note_path) for item in concept_notes if item.note_path]
@@ -156,13 +159,12 @@ def _build_moc_suggestion(
         "",
     ]
     content = f"---\n{dumped.strip()}\n---\n" + "\n".join(body_lines)
-    vault_path = settings.vault_path.resolve() if settings.vault_path else None
     content = apply_note_template(
         content,
         vault_path=vault_path,
         title=f"{source.title} — notes",
         concept="MOC",
-        tags=meta["tags"],
+        tags=list(meta["tags"]),
         source=source,
         location=SourceLocation(),
     )
@@ -246,6 +248,12 @@ def _source_section(source: LoadedSource, location: SourceLocation) -> str:
             "## Source\n\n"
             f"- Article: {source.source_ref}\n"
             f"- Location: {location_text} (in extracted article text)\n"
+        )
+    if source.source_type == "epub":
+        return (
+            "## Source\n\n"
+            f"- Book: `{source.source_ref}`\n"
+            f"- Location: {location_text}\n"
         )
 
     return (
@@ -436,14 +444,14 @@ def _plan_topics(
             SegmentNovelty(
                 segment=segment,
                 best_similarity=0.0,
-                is_novel=False,
-                is_unknown=True,
+                is_novel=True,
+                is_unknown=False,
             )
             for segment in planning_segments
             if segment.text.strip()
         ]
         if progress and total:
-            progress("scoring", total, total, "No index — skipping similarity scoring")
+            progress("scoring", total, total, "No index — treating source segments as novel")
 
     topics = plan_atomic_topics(source, segment_scores, novelty, budget=budget)
 
@@ -498,6 +506,7 @@ def _build_suggestion(
     budget: LLMBudget | None = None,
     vector_store: VectorStore | None = None,
     vault_note_path: str | None = None,
+    vault_path: Path | None = None,
     pre_drafted_body: str | None = None,
 ) -> NoteSuggestion:
     location = topic_location(topic)
@@ -528,7 +537,6 @@ def _build_suggestion(
     body = body.rstrip() + "\n\n" + _source_section(source, location)
     note_tags = _infer_note_tags(overlapping_notes or [])
     content = _build_frontmatter(source, title, location, tags=note_tags) + body
-    vault_path = settings.vault_path.resolve() if settings.vault_path else None
     content = apply_note_template(
         content,
         vault_path=vault_path,
@@ -584,7 +592,8 @@ def _source_meta(source: LoadedSource) -> dict:
         "title": source.title,
         "source_type": source.source_type,
         "source_ref": source.source_ref,
-        "source_key": normalize_source_key(source.source_type, source.source_ref),
+        "source_key": source.source_key
+        or normalize_source_key(source.source_type, source.source_ref),
     }
 
 
@@ -595,14 +604,14 @@ def _stream_plan_topics(
     *,
     warnings: list[str],
     budget: LLMBudget,
-) -> Iterator[dict]:
+) -> Generator[dict, None, list[AtomicTopic]]:
     """Run topic planning while yielding progress events as they happen.
 
     ``_plan_topics`` is blocking; without a side channel the UI would only see
     scoring updates after the whole planning phase finished.
     """
     events: SimpleQueue = SimpleQueue()
-    result: dict = {}
+    result: dict[str, object] = {}
 
     def progress(stage: str, current: int, total: int, message: str) -> None:
         events.put(
@@ -643,8 +652,8 @@ def _stream_plan_topics(
         yield item
     thread.join()
     if "error" in result:
-        raise result["error"]
-    return result["topics"]
+        raise cast(BaseException, result["error"])
+    return cast(list[AtomicTopic], result["topics"])
 
 
 def iter_note_suggestions(
@@ -655,6 +664,7 @@ def iter_note_suggestions(
     checkpoint: SuggestionCheckpoint | None = None,
     resume_suggestions: list[dict] | None = None,
     vault_note_path: str | None = None,
+    vault_path: Path | None = None,
 ) -> Iterator[dict]:
     """Yield progress events while drafting notes; end with a 'suggestions' event.
 
@@ -751,14 +761,15 @@ def iter_note_suggestions(
                 ),
             }
             try:
-                bodies = call_with_retry(
-                    lambda topics=batch_topics: _llm_draft_topics_batch(
+                def draft_batch() -> dict[str, str]:
+                    return _llm_draft_topics_batch(
                         source,
-                        topics,
+                        batch_topics,
                         related_links,
                         budget=budget,
-                    ),
-                )
+                    )
+
+                bodies = call_with_retry(draft_batch)
                 for (identity, topic) in batch:
                     title = compose_title(topic.title)
                     body = bodies.get(title.casefold())
@@ -804,7 +815,7 @@ def iter_note_suggestions(
         suggestion: NoteSuggestion | None = None
         draft_events: SimpleQueue = SimpleQueue()
         _DRAFT_DONE = object()
-        draft_result: dict = {}
+        draft_result: dict[str, object] = {}
 
         def on_rate_limit_wait(attempt: int, delay: float, _exc: BaseException) -> None:
             draft_events.put(
@@ -836,6 +847,7 @@ def iter_note_suggestions(
                             budget=budget,
                             vector_store=vector_store,
                             vault_note_path=vault_note_path,
+                            vault_path=vault_path,
                             pre_drafted_body=pre_body,
                         ),
                         on_wait=on_rate_limit_wait,
@@ -857,16 +869,18 @@ def iter_note_suggestions(
             draft_thread.join()
 
             if "suggestion" in draft_result:
-                suggestion = draft_result["suggestion"]
+                suggestion = cast(NoteSuggestion, draft_result["suggestion"])
                 consecutive_failures = 0
             elif "error" in draft_result:
-                exc = draft_result["error"]
+                stored_error = cast(BaseException, draft_result["error"])
                 if budget.exhausted:
                     llm_disabled = True
-                    yield record_warning(budget.exhausted_reason or str(exc))
-                elif not is_rate_limit_error(exc):
+                    yield record_warning(budget.exhausted_reason or str(stored_error))
+                elif not is_rate_limit_error(stored_error):
                     logger.warning(
-                        "LLM drafting failed for '%s'; using fallback: %s", topic.title, exc
+                        "LLM drafting failed for '%s'; using fallback: %s",
+                        topic.title,
+                        stored_error,
                     )
                     yield record_warning(
                         f"Note '{topic.title}' used an extractive fallback after an LLM error."
@@ -895,6 +909,7 @@ def iter_note_suggestions(
                 budget=budget,
                 vector_store=vector_store,
                 vault_note_path=vault_note_path,
+                vault_path=vault_path,
                 pre_drafted_body=pre_body,
             )
 
@@ -918,7 +933,7 @@ def iter_note_suggestions(
         and len([s for s in suggestions if not s.is_moc]) >= settings.moc_min_notes
         and not any(item.is_moc for item in suggestions)
     ):
-        moc = _build_moc_suggestion(source, suggestions)
+        moc = _build_moc_suggestion(source, suggestions, vault_path=vault_path)
         if moc.note_path not in used_paths:
             suggestions.append(moc)
             if checkpoint is not None:
@@ -982,6 +997,19 @@ class ApplyNoteResult:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class MergedNotePreview:
+    note_path: str
+    mode: str
+    exists: bool
+    will_write: bool
+    existing_content: str
+    final_content: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
 def _resolve_vault_target(vault_path: Path, note_path: str) -> Path:
     vault_path = vault_path.resolve()
     target = (vault_path / note_path).resolve()
@@ -1012,6 +1040,45 @@ def _atomic_write_text(path: Path, content: str) -> None:
         raise
 
 
+def preview_suggestion_merge(
+    vault_path: Path,
+    note_path: str,
+    content: str,
+    mode: str = "write",
+    *,
+    overwrite: bool = False,
+    append_heading: str | None = None,
+) -> MergedNotePreview:
+    """Return the exact bytes-as-text that apply would write, without mutating the vault."""
+    if mode not in {"write", "append"}:
+        raise ValueError("mode must be 'write' or 'append'")
+    target = _resolve_vault_target(vault_path, note_path)
+    rel = target.relative_to(vault_path.resolve()).as_posix()
+    exists = target.is_file()
+    existing = target.read_text(encoding="utf-8") if exists else ""
+    prepared = inject_block_references(content)
+    if mode == "append" and exists:
+        final = merge_append_into_note(
+            existing,
+            prepared,
+            target_heading=append_heading,
+            fallback_heading="Update",
+        )
+    elif mode == "append":
+        final = inject_block_references(content.strip()) + "\n"
+    else:
+        final = existing if exists and not overwrite else prepared
+    will_write = mode == "append" or not exists or overwrite
+    return MergedNotePreview(
+        note_path=rel,
+        mode=mode,
+        exists=exists,
+        will_write=will_write,
+        existing_content=existing,
+        final_content=final,
+    )
+
+
 def apply_suggestion(
     vault_path: Path,
     note_path: str,
@@ -1029,21 +1096,22 @@ def apply_suggestion(
     try:
         target = _resolve_vault_target(vault_path, note_path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        rel = target.relative_to(vault_path.resolve()).as_posix()
+        preview = preview_suggestion_merge(
+            vault_path,
+            note_path,
+            content,
+            mode,
+            overwrite=overwrite,
+            append_heading=append_heading,
+        )
+        rel = preview.note_path
 
         if mode == "append" and target.exists():
-            existing = target.read_text(encoding="utf-8")
-            merged = merge_append_into_note(
-                existing,
-                inject_block_references(content),
-                target_heading=append_heading,
-                fallback_heading="Update",
-            )
-            _atomic_write_text(target, merged)
+            _atomic_write_text(target, preview.final_content)
             return ApplyNoteResult(note_path=note_path, status="appended", written_path=rel)
 
         if mode == "append" and not target.exists():
-            _atomic_write_text(target, inject_block_references(content.strip()) + "\n")
+            _atomic_write_text(target, preview.final_content)
             return ApplyNoteResult(note_path=note_path, status="written", written_path=rel)
 
         if mode == "write" and target.exists() and not overwrite:
@@ -1059,7 +1127,7 @@ def apply_suggestion(
             backup_path = _backup_existing_note(target, vault_path)
             overwritten = True
 
-        _atomic_write_text(target, inject_block_references(content))
+        _atomic_write_text(target, preview.final_content)
         return ApplyNoteResult(
             note_path=note_path,
             status="written",

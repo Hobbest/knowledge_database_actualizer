@@ -8,8 +8,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from app.source_identity import canonical_youtube_url, extract_youtube_video_id
 from app.config import settings
+from app.source_identity import canonical_youtube_url, extract_youtube_video_id
 from app.sources.base import (
     LoadedSource,
     SourceLoader,

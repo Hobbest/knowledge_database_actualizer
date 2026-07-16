@@ -1,7 +1,7 @@
 # Architecture Overview
 
 Knowledge Database Actualizer decides whether a knowledge source (YouTube video,
-web article, PDF, text, or markdown) adds **new** information relative to an
+web article, PDF, EPUB, DOCX, text, or markdown) adds **new** information relative to an
 Obsidian-style markdown vault, and then drafts **atomic, checkable** notes for the concepts it
 finds. This document describes the system as implemented today: core hardening
 (security, concurrency, batched similarity, checkpoints, CI) plus **Obsidian
@@ -83,15 +83,15 @@ writes are safe-by-default; the vector index stays in sync after apply.
 | Layer | Choice | Notes |
 |-------|--------|-------|
 | Backend | Python 3.10+, **FastAPI** + Uvicorn | Async HTTP; sync pipelines on worker pools |
-| Frontend | Vanilla JS SPA, Tailwind (CDN), vis-network | No build step; auth token in `sessionStorage` |
-| Obsidian client | Community plugin (`main.js`) | Commands + sidebar; same API as SPA |
+| Frontend | Vanilla JS SPA, vendored Tailwind + vis-network | No build step; auth token in `sessionStorage` |
+| Obsidian client | Community plugin (`main.js`, `core.js`) | Commands + sidebar; canonical writes via `apply-batch` |
 | Embeddings | **sentence-transformers** *or* **google-genai** | Lazy load; batched queries; retries |
 | Vector store | **ChromaDB** (persistent) | Collection per provider+model; batched upsert |
 | Graph | **networkx** `DiGraph` | Path/stem/alias wikilink resolution |
 | Sources | `pypdf`, `pdfplumber`, `youtube-transcript-api` / `yt-dlp`, `trafilatura`, frontmatter | Tables/figures via pdfplumber; md tags/wikilinks; article extraction |
 | Frontmatter write | **PyYAML** `safe_dump` | No unsafe dump of user/LLM text |
 | LLM (optional) | OpenAI / Anthropic / Gemini / **Ollama** (`local` alias) | Off by default; per-run budget |
-| Tests / CI | **pytest** (102 tests) + GitHub Actions | Hermetic `tests/`; optional `scripts/smoke_test.py` |
+| Tests / CI | **pytest** + Node contract tests + GitHub Actions | Hermetic `tests/`; optional `scripts/smoke_test.py` |
 
 ---
 
@@ -530,13 +530,16 @@ Unset `API_TOKEN` → open local use (default).
 |---------------|---------|
 | `GET /api/status` | Config, index/graph sizes, LLM/embedding info, budgets, `stale_note_count`, `warnings`, `auth_required`, Obsidian URI flags, `thresholds.calibration_available` |
 | `POST /api/vault/index` | Incremental re-index + graph + `index_meta` (`if_stale` skips when fresh) |
+| `POST /api/vault/watch` | Enable/disable debounced index-on-save |
 | `GET /api/vault/note` | Read existing note content (append diff preview) |
 | `GET /api/vault/thresholds/calibrate` | Suggest novelty thresholds from indexed chunk samples |
 | `GET /api/vault/graph` | Vis-network JSON (optional highlight) |
-| `POST /api/sources/analyze` | NDJSON: novelty + suggestions (`resume` optional) |
-| `GET /api/suggestions/checkpoint` | Last run's saved notes |
+| `POST /api/sources/analyze` | NDJSON: novelty + suggestions (`resume`, `vault_note_path`, `vault_path` optional) |
+| `GET /api/suggestions/checkpoint` | Saved notes for a source key / latest incomplete run |
+| `POST /api/suggestions/preview` | Exact merged note content without writing |
 | `POST /api/suggestions/apply` | One note; `overwrite`, `mode` (`write`/`append`); then incremental re-index |
 | `POST /api/suggestions/apply-batch` | Many notes; per-note results + `index_refresh` |
+| `POST /api/vault/refresh-notes` | Re-embed notes already written on disk |
 | `GET /`, `/static/*` | SPA |
 
 Analyze `result` payloads include overlapping notes with **tags** and optional
@@ -602,7 +605,7 @@ data/
 | Path-qualified wikilinks | `wikilinks.py`, `suggest.py` | Related notes use `[[folder/Note]]` when needed |
 | Open in Obsidian | `obsidian_uri.py`, SPA overlap UI | Requires `OBSIDIAN_VAULT_NAME` |
 | Vault templates | `obsidian_templates.py`, `note_output.py` | Reads `.obsidian/app.json` template folder |
-| Obsidian plugin | `obsidian-plugin/` | Analyze, index, sidebar write — see plugin README |
+| Obsidian plugin | `obsidian-plugin/` | Analyze, index, sidebar review; writes via `apply-batch` + `refresh-notes` |
 | Block references | `block_refs.py` | Optional `^block-id` on apply when enabled |
 
 ---
@@ -611,9 +614,11 @@ data/
 
 | Suite | Role |
 |-------|------|
-| `pytest tests/` | 102 hermetic unit tests (fake embedding backend; no HF download) |
+| `pytest tests/` | Hermetic backend unit/integration tests (fake embedding backend; no HF download) |
+| `node --test frontend/app-core.test.js` | Web client NDJSON, preview payload, and input validation contracts |
+| `npm --prefix obsidian-plugin test` | Obsidian client NDJSON + apply payload contracts |
 | `scripts/smoke_test.py` | Optional integration against real MiniLM + sample vault |
-| `.github/workflows/ci.yml` | Install deps, run `pytest tests/` on Python 3.10 & 3.12 |
+| `.github/workflows/ci.yml` | Ruff, Mypy, env sync, pytest, and client contract tests on Python 3.10 & 3.12 |
 
 Pinned runtime deps live in `requirements.txt` / `pyproject.toml`;
 `requirements-dev.txt` adds pytest + httpx.

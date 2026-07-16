@@ -35,8 +35,7 @@ class SegmentNovelty:
     segment: SourceSegment
     best_similarity: float
     is_novel: bool
-    # True when similarity could not be measured (empty index, rate limit, error).
-    # Unknown segments must not be treated as novel for planning decisions.
+    # True when similarity failed unexpectedly (for example, a rate limit).
     is_unknown: bool = False
 
 
@@ -79,8 +78,8 @@ def score_segments(
             SegmentNovelty(
                 segment=segment,
                 best_similarity=0.0,
-                is_novel=False,
-                is_unknown=True,
+                is_novel=True,
+                is_unknown=False,
             )
             for segment in nonempty
         ]

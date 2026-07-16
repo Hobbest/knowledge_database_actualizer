@@ -1,0 +1,15 @@
+services:
+  actualizer:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      VAULT_PATH: /vault
+      DATA_DIR: /data
+      API_TOKEN: ${API_TOKEN:-}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1,[::1]}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
+    volumes:
+      - ./data:/data
+      - ${VAULT_PATH:-./sample_vault}:/vault:ro
+    restart: unless-stopped

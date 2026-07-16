@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import urllib.error
-import urllib.request
 
 from app.config import settings
 from app.media import extract_markdown_tables, find_captions
@@ -15,6 +14,7 @@ from app.sources.base import (
     SourceSegment,
 )
 from app.sources.text import segments_from_markdown
+from app.url_security import UnsafeURLError, open_public_url, response_charset
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +27,12 @@ USER_AGENT = (
 
 
 def fetch_html(url: str) -> str:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
-        charset = response.headers.get_content_charset() or "utf-8"
+    with open_public_url(
+        url,
+        timeout=FETCH_TIMEOUT_SECONDS,
+        headers={"User-Agent": USER_AGENT},
+    ) as response:
+        charset = response_charset(response.headers)
         return response.read().decode(charset, errors="replace")
 
 
@@ -50,7 +53,7 @@ class WebArticleLoader(SourceLoader):
         url = url.strip()
         try:
             html = fetch_html(url)
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, UnsafeURLError) as exc:
             raise ValueError(f"Could not fetch web page {url}: {exc}") from exc
 
         title, markdown = self._extract_article(html, url)

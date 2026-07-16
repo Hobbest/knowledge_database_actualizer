@@ -6,12 +6,105 @@ const {
   MarkdownView,
   PluginSettingTab,
   requestUrl,
-  TFile,
   FileSystemAdapter,
+  Modal,
 } = require("obsidian");
 const http = require("http");
 const https = require("https");
 const { URL } = require("url");
+
+// Obsidian only loads main.js and cannot resolve require("./core"). Keep core.js for
+// contract tests; mirror any changes here until a bundler step is added.
+function parseAppendTarget(target) {
+  if (!target) {
+    return { path: "", heading: null };
+  }
+  const raw = String(target).trim();
+  const hashIndex = raw.indexOf("#");
+  if (hashIndex < 0) {
+    return { path: raw, heading: null };
+  }
+  return {
+    path: raw.slice(0, hashIndex).trim(),
+    heading: raw.slice(hashIndex + 1).trim().replace(/^#+/, "").trim() || null,
+  };
+}
+
+function buildApplyNote(item, overwrite = false) {
+  const mode = item.write_mode === "append" ? "append" : "write";
+  const rawTarget = mode === "append" && item.append_target ? item.append_target : item.note_path;
+  const { path, heading } = parseAppendTarget(rawTarget);
+  return {
+    note_path: String(path || item.note_path || "").trim(),
+    content: String(item.content || ""),
+    mode,
+    overwrite: Boolean(overwrite),
+    append_heading: mode === "append" ? item.append_heading || heading || null : null,
+  };
+}
+
+function buildSelectedApplyNotes(suggestions, selectedIndexes, overwrite = false) {
+  return Array.from(selectedIndexes)
+    .map((index) => suggestions[index])
+    .filter(Boolean)
+    .map((item) => buildApplyNote(item, overwrite));
+}
+
+function editorMarkdown(view, selectionOnly = false) {
+  const editor = view && view.editor;
+  if (!editor) {
+    return "";
+  }
+  if (selectionOnly) {
+    return String(editor.getSelection ? editor.getSelection() : "");
+  }
+  return String(editor.getValue ? editor.getValue() : "");
+}
+
+function consumeNdjsonLines(buffer, onEvent) {
+  let rest = buffer;
+  let newlineIndex;
+  while ((newlineIndex = rest.indexOf("\n")) >= 0) {
+    const line = rest.slice(0, newlineIndex).trim();
+    rest = rest.slice(newlineIndex + 1);
+    if (line) {
+      onEvent(JSON.parse(line));
+    }
+  }
+  return rest;
+}
+
+function parseNdjsonStream(text, onEvent) {
+  let result = null;
+  let streamError = null;
+  let partialSuggestions = [];
+  const handleEvent = (event) => {
+    if (onEvent) {
+      onEvent(event);
+    }
+    if (event.type === "result") {
+      result = event;
+    } else if (event.type === "error") {
+      streamError = new Error(event.message || "Analyze failed");
+      partialSuggestions = event.partial_suggestions || [];
+    }
+  };
+
+  let buffer = consumeNdjsonLines(String(text || ""), handleEvent);
+  if (buffer.trim()) {
+    consumeNdjsonLines(`${buffer}\n`, handleEvent);
+  }
+  if (streamError) {
+    if (partialSuggestions.length) {
+      streamError.partialSuggestions = partialSuggestions;
+    }
+    throw streamError;
+  }
+  if (!result) {
+    throw new Error("No result from analyze stream");
+  }
+  return result;
+}
 
 const VIEW_TYPE = "actualizer-sidebar";
 const DEFAULT_API = "http://127.0.0.1:8000";
@@ -21,142 +114,6 @@ const DEFAULT_SETTINGS = {
   apiToken: "",
   openNotesAfterWrite: true,
 };
-
-function stripFrontmatter(content) {
-  const raw = String(content || "");
-  if (!raw.trim().startsWith("---")) {
-    return raw.trim();
-  }
-  const parts = raw.split("---");
-  if (parts.length >= 3) {
-    return parts.slice(2).join("---").trim();
-  }
-  return raw.trim();
-}
-
-function appendPreviewBody(content) {
-  const body = stripFrontmatter(content);
-  if (!body) {
-    return "";
-  }
-  if (/^#{1,6}\s/m.test(body.trimStart())) {
-    return body;
-  }
-  return `## Update\n\n${body}`;
-}
-
-function normalizeHeading(value) {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ");
-}
-
-function contentForAppend(fullContent, heading = "Update") {
-  const body = stripFrontmatter(fullContent);
-  const trimmed = body.trim();
-  if (!trimmed) {
-    return "";
-  }
-  if (/^#{1,6}\s/m.test(trimmed)) {
-    return trimmed;
-  }
-  return `## ${heading}\n\n${trimmed}`;
-}
-
-function splitByHeadings(text) {
-  const pattern = /^(#{1,6})\s+(.+)$/gm;
-  const matches = [...String(text || "").matchAll(pattern)];
-  if (!matches.length) {
-    return text.trim() ? [[null, text.trim()]] : [];
-  }
-
-  const sections = [];
-  if (matches[0].index > 0) {
-    const preamble = text.slice(0, matches[0].index).trim();
-    if (preamble) {
-      sections.push([null, preamble]);
-    }
-  }
-
-  for (let i = 0; i < matches.length; i += 1) {
-    const match = matches[i];
-    const heading = match[2].trim();
-    const start = match.index + match[0].length;
-    const end = i + 1 < matches.length ? matches[i + 1].index : text.length;
-    const body = text.slice(start, end).trim();
-    if (body) {
-      sections.push([heading, body]);
-    }
-  }
-  return sections;
-}
-
-function mergeAppendIntoNote(
-  existingContent,
-  draftContent,
-  targetHeading = null,
-  fallbackHeading = "Update"
-) {
-  const frontmatterMatch = existingContent.match(/^---[\s\S]*?---\n?/);
-  const frontmatter = frontmatterMatch ? frontmatterMatch[0] : "";
-  const existingBody = stripFrontmatter(existingContent);
-  const appendBody = contentForAppend(draftContent, fallbackHeading);
-  if (!appendBody) {
-    return existingContent.endsWith("\n") ? existingContent : `${existingContent}\n`;
-  }
-
-  if (!targetHeading) {
-    return `${existingContent.trimEnd()}\n\n${appendBody.trim()}\n`;
-  }
-
-  const targetNorm = normalizeHeading(targetHeading);
-  const sections = splitByHeadings(existingBody);
-  if (!sections.length) {
-    return `${existingContent.trimEnd()}\n\n${appendBody.trim()}\n`;
-  }
-
-  const rebuilt = [];
-  let matched = false;
-  sections.forEach(([heading, sectionBody], index) => {
-    if (heading === null) {
-      rebuilt.push(sectionBody.trim());
-      return;
-    }
-    rebuilt.push(`## ${heading}`);
-    if (normalizeHeading(heading) === targetNorm) {
-      matched = true;
-      rebuilt.push(`${sectionBody.trimEnd()}\n\n${appendBody.trim()}`);
-    } else {
-      rebuilt.push(sectionBody.trim());
-    }
-    if (index < sections.length - 1) {
-      rebuilt.push("");
-    }
-  });
-
-  if (!matched) {
-    return `${existingContent.trimEnd()}\n\n${appendBody.trim()}\n`;
-  }
-
-  const newBody = `${rebuilt.join("\n").trim()}\n`;
-  return frontmatter ? `${frontmatter}${newBody}` : newBody;
-}
-
-function parseAppendTarget(target) {
-  if (!target) {
-    return { path: "", heading: null };
-  }
-  const raw = String(target).trim();
-  if (!raw.includes("#")) {
-    return { path: raw, heading: null };
-  }
-  const hashIndex = raw.indexOf("#");
-  return {
-    path: raw.slice(0, hashIndex).trim(),
-    heading: raw.slice(hashIndex + 1).trim().replace(/^#+/, "").trim() || null,
-  };
-}
 
 function computeProgress(event) {
   const total = event.total || 0;
@@ -234,6 +191,45 @@ function concatUint8Arrays(chunks) {
   return out.buffer;
 }
 
+class ActualizerConfirmModal extends Modal {
+  constructor(app, { title, message, confirmText = "Confirm" }, resolve) {
+    super(app);
+    this.details = { title, message, confirmText };
+    this.resolve = resolve;
+    this.settled = false;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl("h3", { text: this.details.title });
+    contentEl.createEl("p", {
+      cls: "actualizer-confirm-message",
+      text: this.details.message,
+    });
+    const actions = contentEl.createEl("div", { cls: "modal-button-container" });
+    actions.createEl("button", { text: "Cancel" }).onclick = () => this.finish(false);
+    actions
+      .createEl("button", { text: this.details.confirmText, cls: "mod-warning" })
+      .onclick = () => this.finish(true);
+  }
+
+  onClose() {
+    if (!this.settled) {
+      this.settled = true;
+      this.resolve(false);
+    }
+    this.contentEl.empty();
+  }
+
+  finish(value) {
+    if (!this.settled) {
+      this.settled = true;
+      this.resolve(value);
+    }
+    this.close();
+  }
+}
+
 async function buildMultipartBody({ url, fileBlob, fileName, resume, vaultNotePath }) {
   const boundary = `----Actualizer${Date.now().toString(16)}`;
   const chunks = [];
@@ -268,62 +264,6 @@ async function buildMultipartBody({ url, fileBlob, fileName, resume, vaultNotePa
     body: concatUint8Arrays(chunks),
     contentType: `multipart/form-data; boundary=${boundary}`,
   };
-}
-
-function consumeNdjsonLines(buffer, onEvent) {
-  let rest = buffer;
-  let newlineIndex;
-  while ((newlineIndex = rest.indexOf("\n")) >= 0) {
-    const line = rest.slice(0, newlineIndex).trim();
-    rest = rest.slice(newlineIndex + 1);
-    if (line) {
-      onEvent(JSON.parse(line));
-    }
-  }
-  return rest;
-}
-
-function parseNdjsonStream(text, onEvent) {
-  let result = null;
-  let streamError = null;
-  let partialSuggestions = [];
-  let buffer = "";
-  buffer = consumeNdjsonLines(String(text || ""), (event) => {
-    if (onEvent) {
-      onEvent(event);
-    }
-    if (event.type === "result") {
-      result = event;
-    }
-    if (event.type === "error") {
-      streamError = new Error(event.message || "Analyze failed");
-      partialSuggestions = event.partial_suggestions || [];
-    }
-  });
-  if (buffer.trim()) {
-    consumeNdjsonLines(`${buffer}\n`, (event) => {
-      if (onEvent) {
-        onEvent(event);
-      }
-      if (event.type === "result") {
-        result = event;
-      }
-      if (event.type === "error") {
-        streamError = new Error(event.message || "Analyze failed");
-        partialSuggestions = event.partial_suggestions || [];
-      }
-    });
-  }
-  if (streamError) {
-    if (partialSuggestions.length) {
-      streamError.partialSuggestions = partialSuggestions;
-    }
-    throw streamError;
-  }
-  if (!result) {
-    throw new Error("No result from analyze stream");
-  }
-  return result;
 }
 
 class ActualizerApi {
@@ -403,14 +343,6 @@ class ActualizerApi {
     return this.request("/api/suggestions/checkpoint");
   }
 
-  getVaultNote(notePath, vaultPath) {
-    const params = new URLSearchParams({ note_path: notePath });
-    if (vaultPath) {
-      params.set("vault_path", vaultPath);
-    }
-    return this.request(`/api/vault/note?${params.toString()}`);
-  }
-
   indexVault(vaultPath, ifStale = false) {
     return this.request("/api/vault/index", {
       method: "POST",
@@ -427,12 +359,24 @@ class ActualizerApi {
     });
   }
 
-  refreshNotes(vaultPath, notePaths) {
-    return this.request("/api/vault/refresh-notes", {
+  previewSuggestion(vaultPath, note) {
+    return this.request("/api/suggestions/preview", {
       method: "POST",
       json: true,
-      body: JSON.stringify({ vault_path: vaultPath, note_paths: notePaths }),
+      body: JSON.stringify({ vault_path: vaultPath, ...note }),
     });
+  }
+
+  setVaultWatch(enabled) {
+    return this.request("/api/vault/watch", {
+      method: "POST",
+      json: true,
+      body: JSON.stringify({ enabled }),
+    });
+  }
+
+  calibrateThresholds() {
+    return this.request("/api/vault/thresholds/calibrate");
   }
 
   async analyze({ url, fileBlob, fileName, resume = false, vaultNotePath, onEvent }) {
@@ -564,6 +508,7 @@ class ActualizerView extends ItemView {
     this.sourceUrl = "";
     this.pendingFile = null;
     this.serverStatus = null;
+    this.calibration = null;
     this.checkpointState = null;
     this.liveDraftNotes = [];
     this._ui = {};
@@ -755,6 +700,15 @@ class ActualizerView extends ItemView {
           ? `${chunks} indexed chunks · ${stale} stale note(s) — re-index recommended`
           : `${chunks} indexed chunks · index fresh`;
       section.createEl("div", { cls: "actualizer-muted actualizer-status-line", text: statusText });
+      const mismatch = this.plugin.vaultPathMismatch(this.serverStatus);
+      if (mismatch) {
+        section.createEl("div", { cls: "actualizer-warnings", text: mismatch });
+      }
+      const watch = this.serverStatus.vault_watch || {};
+      section.createEl("div", {
+        cls: "actualizer-muted actualizer-status-line",
+        text: `Vault watch: ${watch.active ? "active" : watch.enabled ? "enabled, not active" : "off"}`,
+      });
     }
 
     const urlField = section.createEl("div", { cls: "actualizer-field" });
@@ -807,8 +761,14 @@ class ActualizerView extends ItemView {
     analyzeBtn.disabled = this.isAnalyzing;
     analyzeBtn.onclick = () => this.startAnalyze({ resume: false });
 
-    actions.createEl("button", { text: "Index vault" }).onclick = () =>
+    actions.createEl("button", { text: "Update index" }).onclick = () =>
       this.plugin.indexVault();
+    const watchEnabled = Boolean(this.serverStatus?.vault_watch?.enabled);
+    actions.createEl("button", {
+      text: watchEnabled ? "Disable vault watch" : "Enable vault watch",
+    }).onclick = () => this.toggleVaultWatch(!watchEnabled);
+    actions.createEl("button", { text: "Calibrate thresholds" }).onclick = () =>
+      this.calibrateThresholds();
 
     if (this.checkpointState?.recoverable) {
       actions.createEl("button", { text: "Recover saved notes" }).onclick = () =>
@@ -825,6 +785,35 @@ class ActualizerView extends ItemView {
 
     if (this.analyzeError) {
       section.createEl("div", { cls: "actualizer-error", text: this.analyzeError });
+    }
+    if (this.calibration) {
+      const result = this.calibration;
+      section.createEl("div", {
+        cls: "actualizer-muted actualizer-calibration",
+        text:
+          `${result.message} Recommended novel ${result.recommended_novel_threshold}, ` +
+          `known ${result.recommended_known_threshold} (${result.sample_size} samples).`,
+      });
+    }
+  }
+
+  async toggleVaultWatch(enabled) {
+    try {
+      const watch = await this.plugin.api.setVaultWatch(enabled);
+      await this.refreshServerStatus();
+      this.render();
+      new Notice(`Vault watch ${watch.active ? "enabled" : "disabled"}`);
+    } catch (err) {
+      new Notice(`Vault watch failed: ${err.message}`);
+    }
+  }
+
+  async calibrateThresholds() {
+    try {
+      this.calibration = await this.plugin.api.calibrateThresholds();
+      this.render();
+    } catch (err) {
+      new Notice(`Threshold calibration failed: ${err.message}`);
     }
   }
 
@@ -955,6 +944,56 @@ class ActualizerView extends ItemView {
     }
   }
 
+  renderMetadata(container, source, novelty) {
+    const sourceTags = source.tags || [];
+    const sourceLinks = source.wikilinks || [];
+    const overlapTags = novelty.tag_overlap || [];
+    const normalizedSourceTags = new Set(
+      sourceTags.map((tag) => String(tag).replace(/^#/, "").toLowerCase())
+    );
+    const matchedTags = overlapTags.filter((tag) =>
+      normalizedSourceTags.has(String(tag).replace(/^#/, "").toLowerCase())
+    );
+    if (!sourceTags.length && !sourceLinks.length && !overlapTags.length) {
+      return;
+    }
+    const panel = container.createEl("div", { cls: "actualizer-source-metadata" });
+    if (sourceTags.length) {
+      panel.createEl("span", { cls: "actualizer-muted", text: "Source tags: " });
+      sourceTags.forEach((tag) =>
+        panel.createEl("code", { cls: "actualizer-tag", text: `#${String(tag).replace(/^#/, "")}` })
+      );
+    }
+    if (overlapTags.length) {
+      const row = panel.createEl("div");
+      row.createEl("span", { cls: "actualizer-muted", text: "Overlap note tags: " });
+      overlapTags.forEach((tag) =>
+        row.createEl("code", { cls: "actualizer-tag", text: `#${String(tag).replace(/^#/, "")}` })
+      );
+    }
+    if (matchedTags.length) {
+      const row = panel.createEl("div");
+      row.createEl("span", { cls: "actualizer-muted", text: "Source/vault tag overlap: " });
+      matchedTags.forEach((tag) =>
+        row.createEl("code", { cls: "actualizer-tag", text: `#${String(tag).replace(/^#/, "")}` })
+      );
+    }
+    if (sourceLinks.length) {
+      const row = panel.createEl("div");
+      row.createEl("span", { cls: "actualizer-muted", text: "Source wikilinks: " });
+      sourceLinks.forEach((link) => {
+        const button = row.createEl("button", {
+          cls: "actualizer-inline-link",
+          text: `[[${link.target}]]${link.resolved ? "" : " (unresolved)"}`,
+        });
+        button.disabled = !link.resolved;
+        if (link.resolved) {
+          button.onclick = () => this.plugin.openVaultNote(link.note_path);
+        }
+      });
+    }
+  }
+
   renderOverlap(container, notes) {
     const items = notes || [];
     if (!items.length) {
@@ -975,6 +1014,12 @@ class ActualizerView extends ItemView {
         cls: "actualizer-muted",
         text: `${note.note_path} · similarity ${note.max_similarity}`,
       });
+      if (note.tags?.length) {
+        item.createEl("div", {
+          cls: "actualizer-muted",
+          text: `Tags: ${note.tags.map((tag) => `#${String(tag).replace(/^#/, "")}`).join(" ")}`,
+        });
+      }
       if (note.sample_heading) {
         item.createEl("div", {
           cls: "actualizer-overlap-heading",
@@ -1033,6 +1078,12 @@ class ActualizerView extends ItemView {
       cls: "actualizer-muted",
       text: item.location?.display || "",
     });
+    if (item.is_moc) {
+      box.createEl("div", {
+        cls: "actualizer-muted",
+        text: "Deselected by default: MOCs are optional navigation indexes, not atomic source notes.",
+      });
+    }
 
     const pathRow = box.createEl("div", { cls: "actualizer-field" });
     pathRow.createEl("label", { text: "Vault path" });
@@ -1085,8 +1136,14 @@ class ActualizerView extends ItemView {
         cls: "actualizer-muted",
         text: `High overlap (${item.overlap_similarity}) with ${item.append_target}`,
       });
+      if (item.append_heading) {
+        box.createEl("div", {
+          cls: "actualizer-muted",
+          text: `Append under heading: ${item.append_heading}`,
+        });
+      }
       const previewDetails = box.createEl("details", { cls: "actualizer-append-preview" });
-      previewDetails.createEl("summary", { text: "Preview append diff" });
+      previewDetails.createEl("summary", { text: "Preview exact merged note" });
       const previewHost = previewDetails.createEl("div", { cls: "actualizer-append-diff" });
       previewDetails.addEventListener("toggle", () => {
         if (previewDetails.open) {
@@ -1119,18 +1176,28 @@ class ActualizerView extends ItemView {
     host.empty();
     host.setText("Loading preview...");
     try {
-      const existing = await this.plugin.api.getVaultNote(
-        item.append_target,
-        this.plugin.vaultPath()
+      const note = buildApplyNote(this.suggestions[index] || item, false);
+      const preview = await this.plugin.api.previewSuggestion(
+        await this.plugin.resolveVaultPathForApi(),
+        note
       );
-      const proposed = appendPreviewBody(this.suggestions[index].content || item.content);
       host.empty();
+      if (note.append_heading) {
+        host.createEl("div", {
+          cls: "actualizer-muted",
+          text: `Append heading: ${note.append_heading}`,
+        });
+      }
       const grid = host.createEl("div", { cls: "actualizer-append-grid" });
-      const current = grid.createEl("pre", { cls: "actualizer-preview-block" });
-      current.setText(existing.content || "(empty note)");
+      const currentWrap = grid.createEl("div");
+      currentWrap.createEl("strong", { text: "Existing content" });
+      const current = currentWrap.createEl("pre", { cls: "actualizer-preview-block" });
+      current.setText(preview.existing_content || "(empty note)");
       enableNestedScroll(current);
-      const next = grid.createEl("pre", { cls: "actualizer-preview-block" });
-      next.setText(proposed || "(nothing to append)");
+      const finalWrap = grid.createEl("div");
+      finalWrap.createEl("strong", { text: "Exact final content" });
+      const next = finalWrap.createEl("pre", { cls: "actualizer-preview-block" });
+      next.setText(preview.final_content || "(empty note)");
       enableNestedScroll(next);
     } catch (err) {
       host.setText(`Preview failed: ${err.message}`);
@@ -1152,6 +1219,7 @@ class ActualizerView extends ItemView {
       text: `${source.title || "Source"} (${source.source_type || "?"})`,
     });
 
+    this.renderMetadata(container, source, this.result.novelty || {});
     this.renderOverlap(container, this.result.novelty?.overlapping_notes || []);
     this.renderNovel(container, this.result.novelty?.novel_chunks || []);
 
@@ -1159,6 +1227,12 @@ class ActualizerView extends ItemView {
       cls: "actualizer-muted",
       text: `${this.suggestions.length} proposed note(s) · ${this.selected.size} selected`,
     });
+    if (this.suggestions.some((item) => item.is_moc)) {
+      container.createEl("div", {
+        cls: "actualizer-muted",
+        text: "MOC suggestions start deselected because they are optional navigation notes.",
+      });
+    }
 
     const selectionRow = container.createEl("div", { cls: "actualizer-actions" });
     selectionRow.createEl("button", { text: "Select all" }).onclick = () => {
@@ -1288,25 +1362,11 @@ class ActualizerView extends ItemView {
   }
 
   async writeSelected({ overwriteExisting = false } = {}) {
-    const notes = [];
-    for (const idx of this.selected) {
-      const item = this.suggestions[idx];
-      if (!item) {
-        continue;
-      }
-      const mode = item.write_mode === "append" ? "append" : "write";
-      const rawTarget =
-        mode === "append" && item.append_target ? item.append_target : item.note_path;
-      const { path: targetPath, heading: targetHeading } = parseAppendTarget(rawTarget);
-      notes.push({
-        note_path: String(targetPath || item.note_path || "").trim(),
-        content: item.content,
-        mode,
-        overwrite: overwriteExisting,
-        append_heading:
-          mode === "append" ? item.append_heading || targetHeading || null : null,
-      });
-    }
+    const notes = buildSelectedApplyNotes(
+      this.suggestions,
+      this.selected,
+      overwriteExisting
+    );
     if (!notes.length) {
       new Notice("Select at least one note");
       return;
@@ -1321,65 +1381,49 @@ class ActualizerView extends ItemView {
     try {
       this.setProgress("Writing notes to vault...");
       this.writeStatus = "";
-      const results = [];
-      for (const note of notes) {
-        results.push(await this.plugin.writeNoteToVault(note));
+      const vaultPath = await this.plugin.resolveVaultPathForApi();
+      if (!vaultPath) {
+        throw new Error("Vault path is unavailable; configure it in the server or use a local vault.");
       }
-
-      let written = results.filter((r) => r.written_path);
-      let skipped = results.filter((r) => r.status === "skipped_exists");
-      const errors = results.filter((r) => r.status === "error");
+      const responses = [await this.plugin.api.applyBatch(vaultPath, notes)];
+      let results = [...(responses[0].results || [])];
+      let skipped = results.filter((result) => result.status === "skipped_exists");
 
       if (skipped.length && !overwriteExisting) {
-        const paths = skipped.map((r) => r.note_path).slice(0, 8);
-        const extra =
-          skipped.length > 8 ? `\n…and ${skipped.length - 8} more` : "";
-        const confirmed = confirm(
-          `${skipped.length} note(s) already exist:\n\n${paths.join("\n")}${extra}\n\nOverwrite them? Obsidian file history may still apply.`
-        );
+        const paths = skipped.map((result) => result.note_path);
+        const shown = paths.slice(0, 8).join("\n");
+        const extra = paths.length > 8 ? `\n…and ${paths.length - 8} more` : "";
+        const confirmed = await this.plugin.confirmAction({
+          title: "Overwrite existing notes?",
+          message:
+            `${skipped.length} note(s) already exist:\n\n${shown}${extra}\n\n` +
+            "The server will keep a .bak copy before each overwrite.",
+          confirmText: "Overwrite",
+        });
         if (confirmed) {
-          for (const skippedNote of skipped) {
-            const retry = notes.find((n) => n.note_path === skippedNote.note_path);
-            if (!retry) {
-              continue;
-            }
-            const retryResult = await this.plugin.writeNoteToVault({
-              ...retry,
-              overwrite: true,
-            });
-            results.push(retryResult);
-            if (retryResult.written_path) {
-              written = [...written, retryResult];
-            }
-          }
+          const skippedPaths = new Set(paths);
+          const retryNotes = notes
+            .filter((note) => skippedPaths.has(note.note_path))
+            .map((note) => ({ ...note, overwrite: true }));
+          const retryResponse = await this.plugin.api.applyBatch(vaultPath, retryNotes);
+          responses.push(retryResponse);
+          results = [
+            ...results.filter((result) => result.status !== "skipped_exists"),
+            ...(retryResponse.results || []),
+          ];
           skipped = [];
         }
       }
 
+      const written = results.filter((result) => result.written_path);
+      const errors = results.filter((result) => result.status === "error");
       if (written.length) {
-        const vaultPath = await this.plugin.resolveVaultPathForApi();
-        if (vaultPath) {
-          try {
-            const refresh = await this.plugin.api.refreshNotes(
-              vaultPath,
-              written.map((r) => r.written_path)
-            );
-            if (refresh.warning) {
-              this.warnings = [...this.warnings, refresh.warning];
-            }
-          } catch (err) {
-            this.warnings = [
-              ...this.warnings,
-              `Notes were written, but index refresh failed: ${err.message}`,
-            ];
+        for (const response of responses) {
+          if (response.index_refresh?.warning) {
+            this.warnings = [...this.warnings, response.index_refresh.warning];
           }
-        } else {
-          this.warnings = [
-            ...this.warnings,
-            "Notes were written in Obsidian, but the search index was not refreshed (vault path unavailable). Re-index the vault in the server UI.",
-          ];
         }
-        await this.plugin.openVaultNotes(written.map((r) => r.written_path));
+        await this.plugin.openVaultNotes(written.map((result) => result.written_path));
       }
 
       const parts = [];
@@ -1451,12 +1495,13 @@ class ActualizerSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("API token")
       .setDesc("Optional — matches API_TOKEN in the Actualizer .env")
-      .addText((text) =>
-        text.setValue(this.plugin.settings.apiToken).onChange(async (value) => {
+      .addText((text) => {
+        text.inputEl.type = "password";
+        return text.setValue(this.plugin.settings.apiToken).onChange(async (value) => {
           this.plugin.settings.apiToken = value;
           await this.plugin.saveSettings();
-        })
-      );
+        });
+      });
 
     new Setting(containerEl)
       .setName("Open notes after write")
@@ -1606,89 +1651,26 @@ class KnowledgeDatabaseActualizerPlugin extends Plugin {
     }
   }
 
-  async ensureParentFolders(notePath) {
-    const parts = notePath.split("/").filter(Boolean);
-    parts.pop();
-    let acc = "";
-    for (const part of parts) {
-      acc = acc ? `${acc}/${part}` : part;
-      if (!this.app.vault.getAbstractFileByPath(acc)) {
-        await this.app.vault.createFolder(acc);
-      }
+  vaultPathMismatch(status = null) {
+    const local = this.vaultPath();
+    const configured = status?.vault_path;
+    if (!local || !configured) {
+      return "";
     }
+    const normalize = (value) => {
+      const normalized = String(value).replace(/\\/g, "/").replace(/\/+$/, "");
+      return /^[a-z]:/i.test(normalized) ? normalized.toLowerCase() : normalized;
+    };
+    if (normalize(local) === normalize(configured)) {
+      return "";
+    }
+    return `Vault path mismatch: Obsidian is using ${local}, but the server is configured for ${configured}. Requests will explicitly use the Obsidian vault; update VAULT_PATH to keep watcher and status data aligned.`;
   }
 
-  async writeNoteToVault(note) {
-    const path = String(note.note_path || "").trim();
-    if (!path) {
-      return { status: "error", note_path: path, error: "Missing vault path" };
-    }
-
-    const mode = note.mode === "append" ? "append" : "write";
-    const content = String(note.content || "");
-    const file = this.app.vault.getAbstractFileByPath(path);
-
-    try {
-      if (mode === "append") {
-        if (file instanceof TFile) {
-          const current = await this.app.vault.read(file);
-          const merged = mergeAppendIntoNote(
-            current,
-            content,
-            note.append_heading || null
-          );
-          await this.app.vault.modify(file, merged);
-          return { status: "appended", note_path: path, written_path: path };
-        }
-        await this.ensureParentFolders(path);
-        const created = await this.app.vault.create(
-          path,
-          content.endsWith("\n") ? content : `${content}\n`
-        );
-        return {
-          status: "written",
-          note_path: path,
-          written_path: created.path,
-        };
-      }
-
-      if (file instanceof TFile) {
-        if (!note.overwrite) {
-          return {
-            status: "skipped_exists",
-            note_path: path,
-            error: "Note already exists",
-          };
-        }
-        await this.app.vault.modify(
-          file,
-          content.endsWith("\n") ? content : `${content}\n`
-        );
-        return {
-          status: "written",
-          note_path: path,
-          written_path: path,
-          overwritten: true,
-        };
-      }
-
-      await this.ensureParentFolders(path);
-      const created = await this.app.vault.create(
-        path,
-        content.endsWith("\n") ? content : `${content}\n`
-      );
-      return {
-        status: "written",
-        note_path: path,
-        written_path: created.path,
-      };
-    } catch (err) {
-      return {
-        status: "error",
-        note_path: path,
-        error: err.message || String(err),
-      };
-    }
+  confirmAction(details) {
+    return new Promise((resolve) => {
+      new ActualizerConfirmModal(this.app, details, resolve).open();
+    });
   }
 
   async writeSelectedNotes() {
@@ -1714,8 +1696,13 @@ class KnowledgeDatabaseActualizerPlugin extends Plugin {
       return;
     }
     for (let i = 0; i < relativePaths.length; i += 1) {
-      const file = this.app.vault.getAbstractFileByPath(relativePaths[i]);
+      let file = this.app.vault.getAbstractFileByPath(relativePaths[i]);
+      for (let attempt = 0; !file && attempt < 5; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 100 * (attempt + 1)));
+        file = this.app.vault.getAbstractFileByPath(relativePaths[i]);
+      }
       if (!file) {
+        new Notice(`Note was written but is not visible in Obsidian yet: ${relativePaths[i]}`);
         continue;
       }
       const leaf = i === 0 ? this.app.workspace.getLeaf(false) : this.app.workspace.getLeaf("tab");
@@ -1736,7 +1723,7 @@ class KnowledgeDatabaseActualizerPlugin extends Plugin {
       if (!file) {
         throw new Error(`File no longer exists: ${ctx.path}`);
       }
-      const content = await this.app.vault.read(file);
+      const content = await this.currentEditorContent(file);
       return {
         fileBlob: new Blob([content], { type: "text/markdown" }),
         fileName: file.name,
@@ -1745,7 +1732,7 @@ class KnowledgeDatabaseActualizerPlugin extends Plugin {
     }
     if (ctx.kind === "selection") {
       return {
-        fileBlob: new Blob([ctx.text], { type: "text/plain" }),
+        fileBlob: new Blob([ctx.text], { type: "text/markdown" }),
         fileName: ctx.fileName,
         vaultNotePath: ctx.path || undefined,
       };
@@ -1760,17 +1747,23 @@ class KnowledgeDatabaseActualizerPlugin extends Plugin {
 
   async ensureFreshIndex() {
     const status = await this.api.status();
+    if (this.vaultPathMismatch(status)) {
+      await this.api.indexVault(this.vaultPath(), true);
+      return;
+    }
     const stale = status.stale_note_count || 0;
     if (stale <= 0) {
       return;
     }
-    const proceed = confirm(
-      `${stale} vault note(s) changed since the last index.\n\nRe-index now?`
-    );
+    const proceed = await this.confirmAction({
+      title: "Update stale vault index?",
+      message: `${stale} vault note(s) changed since the last index. Update it before analysis?`,
+      confirmText: "Update index",
+    });
     if (!proceed) {
       return;
     }
-    await this.api.indexVault(this.vaultPath(), false);
+    await this.api.indexVault(this.vaultPath(), true);
     new Notice(`Re-indexed vault (${stale} stale note(s))`);
   }
 
@@ -1881,6 +1874,17 @@ class KnowledgeDatabaseActualizerPlugin extends Plugin {
     this.lastAnalyzeContext = context;
   }
 
+  async currentEditorContent(file) {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (view?.file?.path === file.path) {
+      const value = editorMarkdown(view);
+      if (value || view.editor?.getValue) {
+        return value;
+      }
+    }
+    return this.app.vault.read(file);
+  }
+
   async analyzeCurrentFile() {
     const file = this.app.workspace.getActiveFile();
     if (!file) {
@@ -1888,7 +1892,7 @@ class KnowledgeDatabaseActualizerPlugin extends Plugin {
       return;
     }
     this.rememberAnalyzeContext({ kind: "file", path: file.path });
-    const content = await this.app.vault.read(file);
+    const content = await this.currentEditorContent(file);
     const blob = new Blob([content], { type: "text/markdown" });
     await this.runAnalyze(
       { fileBlob: blob, fileName: file.name, vaultNotePath: file.path },
@@ -1920,20 +1924,20 @@ class KnowledgeDatabaseActualizerPlugin extends Plugin {
       new Notice("Open a markdown note first");
       return;
     }
-    const selection = view.editor.getSelection();
+    const selection = editorMarkdown(view, true);
     if (!selection.trim()) {
       new Notice("Select some text first");
       return;
     }
     const file = view.file;
-    const fileName = file ? `${file.basename}-selection.txt` : "selection.txt";
+    const fileName = file ? `${file.basename}-selection.md` : "selection.md";
     this.rememberAnalyzeContext({
       kind: "selection",
       path: file ? file.path : null,
       text: selection,
       fileName,
     });
-    const blob = new Blob([selection], { type: "text/plain" });
+    const blob = new Blob([selection], { type: "text/markdown" });
     await this.runAnalyze(
       { fileBlob: blob, fileName, vaultNotePath: file ? file.path : undefined },
       { label: "Analyzing selection..." }
@@ -1943,7 +1947,7 @@ class KnowledgeDatabaseActualizerPlugin extends Plugin {
   async indexVault() {
     try {
       new Notice("Indexing vault...");
-      const result = await this.api.indexVault(this.vaultPath(), false);
+      const result = await this.api.indexVault(this.vaultPath(), true);
       const view = await this.getView();
       if (view) {
         await view.refreshServerStatus();

@@ -13,7 +13,7 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 from app.config import settings
-from app.index_meta import stale_note_count
+from app.index_meta import active_vault_path, stale_note_count
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ class _VaultWatchHandler(FileSystemEventHandler):
 
 class VaultWatchService:
     def __init__(self):
-        self._observer: Observer | None = None
+        self._observer: Any | None = None
         self._timer: threading.Timer | None = None
         self._lock = threading.Lock()
         self._index_runner: Callable[[Path], dict[str, Any]] | None = None
@@ -71,7 +71,7 @@ class VaultWatchService:
     def configure(self, index_runner: Callable[[Path], dict[str, Any]]) -> None:
         self._index_runner = index_runner
 
-    def _detach(self) -> tuple[Observer | None, threading.Timer | None]:
+    def _detach(self) -> tuple[Any | None, threading.Timer | None]:
         with self._lock:
             timer = self._timer
             observer = self._observer
@@ -80,7 +80,7 @@ class VaultWatchService:
             self.active = False
             return observer, timer
 
-    def _shutdown(self, observer: Observer | None, timer: threading.Timer | None) -> None:
+    def _shutdown(self, observer: Any | None, timer: threading.Timer | None) -> None:
         if timer is not None:
             timer.cancel()
         if observer is not None:
@@ -96,10 +96,10 @@ class VaultWatchService:
             if not settings.vault_watch_enabled:
                 self.enabled = False
                 return
-            vault_path = settings.vault_path
+            vault_path = active_vault_path()
             if vault_path is None or not vault_path.is_dir():
                 self.enabled = settings.vault_watch_enabled
-                self.last_error = "VAULT_PATH is not configured or missing"
+                self.last_error = "No indexed vault is configured or the vault path is missing"
                 return
 
             handler = _VaultWatchHandler(lambda: self._schedule_reindex())
@@ -147,7 +147,7 @@ class VaultWatchService:
             self._timer.start()
 
     def _run_reindex(self) -> None:
-        vault_path = settings.vault_path
+        vault_path = active_vault_path()
         if vault_path is None or not vault_path.is_dir() or self._index_runner is None:
             return
 

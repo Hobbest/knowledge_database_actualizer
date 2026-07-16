@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath
 
 from app.atomic_notes import AtomicTopic
 from app.chunking import _split_by_headings
@@ -39,6 +39,7 @@ def normalize_vault_relative_path(
 
     vault = vault.resolve()
     candidate = Path(str(path))
+    rel: PurePath
     if candidate.is_absolute():
         try:
             rel = candidate.resolve().relative_to(vault)

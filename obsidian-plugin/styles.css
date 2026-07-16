@@ -164,9 +164,20 @@
   margin-bottom: 0.5rem;
 }
 
-.actualizer-verdict.known { background: #fee2e2; color: #991b1b; }
-.actualizer-verdict.partial { background: #fef3c7; color: #92400e; }
-.actualizer-verdict.novel { background: #dcfce7; color: #166534; }
+.actualizer-verdict.known {
+  background: color-mix(in srgb, var(--text-error) 16%, var(--background-primary));
+  color: var(--text-error);
+}
+
+.actualizer-verdict.partial {
+  background: color-mix(in srgb, var(--text-warning) 16%, var(--background-primary));
+  color: var(--text-warning);
+}
+
+.actualizer-verdict.novel {
+  background: color-mix(in srgb, var(--text-success) 16%, var(--background-primary));
+  color: var(--text-success);
+}
 
 .actualizer-progress {
   color: var(--text-muted);
@@ -279,6 +290,46 @@
 
 .actualizer-overlap-list {
   margin-top: 0.35rem;
+}
+
+.actualizer-source-metadata {
+  margin-top: 0.35rem;
+  line-height: 1.8;
+}
+
+.actualizer-tag {
+  margin-right: 0.25rem;
+  color: var(--text-accent);
+}
+
+.actualizer-inline-link {
+  margin: 0 0.25rem 0.2rem 0;
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+  background: transparent;
+  color: var(--link-color);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.actualizer-inline-link:hover {
+  color: var(--link-color-hover);
+  text-decoration: underline;
+}
+
+.actualizer-inline-link:disabled {
+  color: var(--text-faint);
+  cursor: default;
+  text-decoration: none;
+}
+
+.actualizer-calibration {
+  margin-top: 0.35rem;
+}
+
+.actualizer-confirm-message {
+  white-space: pre-wrap;
 }
 
 .actualizer-overlap-item {

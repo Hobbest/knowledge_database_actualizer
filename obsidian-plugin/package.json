@@ -1,0 +1,7 @@
+{
+  "name": "knowledge-database-actualizer-obsidian",
+  "private": true,
+  "scripts": {
+    "test": "node --test"
+  }
+}

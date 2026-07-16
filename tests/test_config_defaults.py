@@ -74,6 +74,10 @@ def test_default_chunk_size_fits_default_embedding_model():
     assert fields["chunk_overlap"].default < chunk_size
 
 
+def test_default_upload_limit_is_conservative():
+    assert Settings.model_fields["max_upload_mb"].default == 50
+
+
 def test_max_embedding_input_chars_unknown_model_is_none():
     assert max_embedding_input_chars("local", "some-unknown-model") is None
 

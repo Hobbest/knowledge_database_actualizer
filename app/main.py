@@ -24,7 +24,12 @@ from app.checkpoint import (
 from app.config import settings
 from app.embeddings import chunk_size_error
 from app.graph import KnowledgeGraph
-from app.index_meta import collect_index_warnings, load_index_meta, stale_note_count
+from app.index_meta import (
+    active_vault_path,
+    collect_index_warnings,
+    load_index_meta,
+    stale_note_count,
+)
 from app.note_output import normalize_vault_relative_path
 from app.novelty import NoveltyResult, analyze_novelty
 from app.obsidian_uri import obsidian_open_uri, obsidian_uri_available
@@ -35,6 +40,7 @@ from app.suggest import (
     apply_suggestion,
     apply_suggestions,
     iter_note_suggestions,
+    preview_suggestion_merge,
 )
 from app.text_limits import TEXT_LIMITS
 from app.threshold_calibration import calibrate_thresholds
@@ -168,15 +174,6 @@ class RefreshNotesRequest(BaseModel):
     note_paths: list[str] = Field(default_factory=list)
 
 
-def _ensure_vault_configured() -> Path:
-    if not settings.vault_path:
-        raise HTTPException(status_code=400, detail="Vault path is not configured")
-    vault_path = settings.vault_path.resolve()
-    if not vault_path.is_dir():
-        raise HTTPException(status_code=400, detail=f"Vault path does not exist: {vault_path}")
-    return vault_path
-
-
 def _resolve_vault_path(requested: str | None = None) -> Path:
     """Prefer an explicit path (UI / request), else the configured settings path."""
     raw = (requested or "").strip() or None
@@ -191,7 +188,6 @@ def _resolve_vault_path(requested: str | None = None) -> Path:
         )
     if not vault_path.is_dir():
         raise HTTPException(status_code=400, detail=f"Vault path does not exist: {vault_path}")
-    settings.vault_path = vault_path
     return vault_path
 
 
@@ -236,7 +232,6 @@ def _run_full_index(vault_path: Path) -> dict:
         index_stats = get_vector_store(vault_path).index_vault(vault_path)
         vault_result = graph.build_from_vault(vault_path)
         graph.save(settings.graph_cache_path)
-        settings.vault_path = vault_path
         return {
             "vault_path": str(vault_path),
             "notes": vault_result.note_count,
@@ -292,6 +287,7 @@ def _iter_analyze_events(
     file_bytes: bytes | None,
     resume: bool,
     vault_note_path: str | None = None,
+    vault_path: Path | None = None,
 ) -> Iterator[dict]:
     """Synchronous analyze pipeline (runs in a worker thread)."""
     checkpoint: SuggestionCheckpoint | None = None
@@ -310,18 +306,30 @@ def _iter_analyze_events(
         else:
             raise ValueError("Provide either a source URL or an uploaded file.")
 
-        normalized_vault_note = normalize_vault_relative_path(vault_note_path) if vault_note_path else None
+        normalized_vault_note = (
+            normalize_vault_relative_path(vault_note_path, vault_path)
+            if vault_note_path
+            else None
+        )
         if normalized_vault_note and source.source_type == "markdown":
             source.source_ref = normalized_vault_note
 
         for warning in source.load_warnings:
             yield {"type": "warning", "message": warning}
 
-        checkpoint = SuggestionCheckpoint.for_source(source.source_type, source.source_ref)
+        checkpoint = SuggestionCheckpoint.for_source(
+            source.source_type,
+            source.source_ref,
+            source_key=source.source_key,
+        )
 
         resume_suggestions: list[dict] | None = None
         if resume:
-            saved = load_checkpoint_for_source(source.source_type, source.source_ref)
+            saved = load_checkpoint_for_source(
+                source.source_type,
+                source.source_ref,
+                source_key=source.source_key,
+            )
             if (
                     saved
                     and not saved.get("completed")
@@ -329,6 +337,7 @@ def _iter_analyze_events(
                         saved,
                         source.source_ref,
                         source_type=source.source_type,
+                        source_key=source.source_key,
                     )
                 ):
                 resume_suggestions = saved.get("suggestions") or []
@@ -353,7 +362,11 @@ def _iter_analyze_events(
                 }
                 return
         else:
-            saved = load_checkpoint_for_source(source.source_type, source.source_ref)
+            saved = load_checkpoint_for_source(
+                source.source_type,
+                source.source_ref,
+                source_key=source.source_key,
+            )
             if saved and not saved.get("completed") and saved.get("suggestions"):
                 n = len(saved["suggestions"])
                 saved_ref = (saved.get("source") or {}).get("source_ref") or "unknown source"
@@ -365,12 +378,12 @@ def _iter_analyze_events(
                     ),
                 }
 
-        active_store = get_vector_store(settings.vault_path)
+        active_store = get_vector_store(vault_path)
         with INDEX_LOCK:
             indexed_chunks = active_store.chunk_count()
         for warning in collect_index_warnings(
             indexed_chunks=indexed_chunks,
-            vault_path=settings.vault_path,
+            vault_path=vault_path,
         ):
             yield {"type": "warning", "message": warning}
 
@@ -399,6 +412,7 @@ def _iter_analyze_events(
             checkpoint=checkpoint,
             resume_suggestions=resume_suggestions,
             vault_note_path=normalized_vault_note,
+            vault_path=vault_path,
         ):
             if event.get("type") == "suggestions":
                 suggestions = event["suggestions"]
@@ -516,9 +530,33 @@ async def _queue_to_async_stream(queue: Queue, cancelled: threading.Event) -> As
         cancelled.set()
 
 
+async def _read_upload_bounded(upload: UploadFile, limit_mb: int) -> bytes:
+    """Read in bounded chunks and stop as soon as the configured cap is exceeded."""
+    chunk_size = 1024 * 1024
+    limit_bytes = limit_mb * 1024 * 1024 if limit_mb > 0 else None
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await upload.read(chunk_size)
+        if not chunk:
+            break
+        total += len(chunk)
+        if limit_bytes is not None and total > limit_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"Upload exceeds the {limit_mb} MB limit "
+                    "(MAX_UPLOAD_MB, 0 = unlimited)."
+                ),
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @app.get("/api/status")
 def get_status():
-    active_store = get_vector_store(settings.vault_path)
+    resolved_vault = active_vault_path()
+    active_store = get_vector_store(resolved_vault)
     with INDEX_LOCK:
         indexed_chunks = active_store.chunk_count()
         graph_nodes = graph.graph.number_of_nodes()
@@ -528,11 +566,11 @@ def get_status():
             graph_nodes = graph.graph.number_of_nodes()
             graph_edges = graph.graph.number_of_edges()
 
-    vault_path = str(settings.vault_path) if settings.vault_path else None
-    stale = stale_note_count()
+    vault_path = str(resolved_vault) if resolved_vault else None
+    stale = stale_note_count(resolved_vault)
     warnings = collect_index_warnings(
         indexed_chunks=indexed_chunks,
-        vault_path=settings.vault_path,
+        vault_path=resolved_vault,
     )
     warnings.extend(threshold_mismatch_warnings())
     return {
@@ -579,10 +617,10 @@ def get_status():
 async def set_vault_watch(request: VaultWatchRequest):
     """Enable or disable automatic re-index when vault markdown files change."""
     vault_watch.set_enabled(request.enabled)
-    if request.enabled and settings.vault_path is None:
+    if request.enabled and active_vault_path() is None:
         raise HTTPException(
             status_code=400,
-            detail="Configure VAULT_PATH before enabling vault watch",
+            detail="Index a vault first (or configure VAULT_PATH) before enabling vault watch",
         )
     return vault_watch.status()
 
@@ -676,26 +714,17 @@ async def analyze_source(
     file: UploadFile | None = File(default=None),
     resume: bool = Form(default=False),
     vault_note_path: str | None = Form(default=None),
+    vault_path: str | None = Form(default=None),
 ):
-    _ensure_vault_configured()
+    active_vault = _resolve_vault_path(vault_path)
 
     if not url and not file:
         raise HTTPException(status_code=400, detail="Provide either url or file")
 
-    # Read the upload before streaming; the worker thread must not touch UploadFile.
-    file_bytes = await file.read() if file else None
+    # The worker thread must not touch UploadFile. Stop reading immediately at the cap.
+    file_bytes = await _read_upload_bounded(file, settings.max_upload_mb) if file else None
     file_name = (file.filename or "upload.txt") if file else None
     clean_url = url.strip() if url else None
-
-    limit_mb = settings.max_upload_mb
-    if file_bytes is not None and limit_mb > 0 and len(file_bytes) > limit_mb * 1024 * 1024:
-        raise HTTPException(
-            status_code=413,
-            detail=(
-                f"Upload is {len(file_bytes) / (1024 * 1024):.1f} MB; the limit is "
-                f"{limit_mb} MB (MAX_UPLOAD_MB, 0 = unlimited)."
-            ),
-        )
 
     queue: Queue = Queue(maxsize=32)
     cancelled = threading.Event()
@@ -707,6 +736,7 @@ async def analyze_source(
             file_bytes=file_bytes,
             resume=resume,
             vault_note_path=vault_note_path.strip() if vault_note_path else None,
+            vault_path=active_vault,
         )
 
     ANALYZE_POOL.submit(_ndjson_worker, queue, iterator_factory, cancelled)
@@ -814,6 +844,24 @@ async def apply_note_suggestion(request: ApplySuggestionRequest):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/suggestions/preview")
+async def preview_note_suggestion(request: ApplySuggestionRequest):
+    """Preview the exact final note content without writing or refreshing the index."""
+    vault_path = _resolve_vault_path(request.vault_path)
+    try:
+        preview = preview_suggestion_merge(
+            vault_path=vault_path,
+            note_path=request.note_path,
+            content=request.content,
+            mode=request.mode,
+            overwrite=request.overwrite,
+            append_heading=request.append_heading,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {**preview.to_dict(), "vault_path": str(vault_path)}
 
 
 @app.get("/")

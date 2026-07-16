@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from app.atomic_notes import score_segments
 from app.novelty import Verdict, analyze_novelty
+from app.sources.base import SourceLocation, SourceSegment
 from app.vectorstore import SimilarChunk, VectorStore
 
 
@@ -72,3 +74,10 @@ def test_empty_index_treats_as_novel(vector_store: VectorStore):
     result = analyze_novelty("Anything at all about quantum widgets.", vector_store)
     assert result.verdict == Verdict.NOVEL
     assert vector_store.chunk_count() == 0
+
+    segment_scores = score_segments(
+        [SourceSegment("Anything at all about quantum widgets.", SourceLocation())],
+        vector_store,
+    )
+    assert segment_scores[0].is_novel is True
+    assert segment_scores[0].is_unknown is False
