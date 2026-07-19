@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from app.config import settings
 from app.json_extract import extract_json_array
-from app.llm import call_with_retry, complete_with_usage, get_llm_provider, is_rate_limit_error
+from app.llm import call_with_retry, complete_with_usage, get_llm_provider
 from app.novelty import NoveltyResult
 from app.prompts import ARCHITECT_SYSTEM_PROMPT, topic_planning_prompt
 from app.sources.base import LoadedSource, SourceLocation, SourceSegment, merge_locations
@@ -83,70 +83,25 @@ def score_segments(
     source_tags: list[str] | None = None,
     on_batch: Callable[..., None] | None = None,
 ) -> list[SegmentNovelty]:
-    """Score many segments with batched embedding + Chroma queries.
+    """Score segments for planning, judging novelty at ``chunk_size``.
 
-    On embedding rate-limit after retries, remaining segments are marked
-    ``is_unknown`` (not novel) so planning does not invent novelty.
+    Each planning segment is split into chunk-sized units (the vault's index
+    granularity) and scored; the chunk verdicts are aggregated back up so a
+    segment counts as novel when any of its chunks carries new content. On an
+    embedding rate-limit remaining chunks degrade to ``is_unknown`` (not novel)
+    so planning never invents novelty.
     """
-    nonempty = [segment for segment in segments if segment.text.strip()]
-    if not nonempty:
-        return []
+    # Imported here to avoid a module cycle (novelty imports SegmentNovelty).
+    from app.novelty import _score_segments_via_chunks
 
-    if vector_store.chunk_count() == 0:
-        return [
-            SegmentNovelty(
-                segment=segment,
-                best_similarity=0.0,
-                is_novel=True,
-                is_unknown=False,
-            )
-            for segment in nonempty
-        ]
-
-    results: list[SegmentNovelty] = []
-    batch_size = max(1, settings.embedding_query_batch_size)
-    total = len(nonempty)
-
-    for start in range(0, total, batch_size):
-        batch = nonempty[start : start + batch_size]
-        texts = [segment.text.strip() for segment in batch]
-        try:
-            matches_batch = vector_store.query_similar_many(
-                texts, top_k=1, query_tags=source_tags
-            )
-        except Exception as exc:  # noqa: BLE001 - degrade remaining to unknown
-            if not is_rate_limit_error(exc):
-                raise
-            for segment in nonempty[start:]:
-                results.append(
-                    SegmentNovelty(
-                        segment=segment,
-                        best_similarity=0.0,
-                        is_novel=False,
-                        is_unknown=True,
-                    )
-                )
-            if on_batch is not None:
-                on_batch(len(nonempty), total, rate_limited=True)
-            return results
-
-        for segment, matches in zip(batch, matches_batch, strict=True):
-            # Use the raw cosine (not the tag-boosted score) so a shared tag
-            # cannot flip a genuinely novel segment to "known" during planning.
-            top = matches[0] if matches else None
-            best_similarity = top.content_similarity if top else 0.0
-            results.append(
-                SegmentNovelty(
-                    segment=segment,
-                    best_similarity=best_similarity,
-                    is_novel=best_similarity < settings.novel_threshold,
-                    is_unknown=False,
-                )
-            )
-        if on_batch is not None:
-            on_batch(min(start + len(batch), total), total, rate_limited=False)
-
-    return results
+    segment_scores, _chunk_scores, _rate_limited = _score_segments_via_chunks(
+        segments,
+        vector_store,
+        source_tags=source_tags,
+        top_k=1,
+        on_batch=on_batch,
+    )
+    return segment_scores
 
 
 def plan_atomic_topics(

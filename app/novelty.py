@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -74,6 +75,181 @@ def _classify_chunk(
     effective = classification_similarity(base_similarity, query_tags, match_tags)
     is_known = effective >= settings.known_threshold
     return is_novel, is_known
+
+
+@dataclass
+class _ChunkScore:
+    """A novelty-scoring chunk carved out of a (larger) planning segment."""
+
+    segment_pos: int
+    text: str
+    best_similarity: float
+    is_novel: bool
+    is_known: bool
+    is_unknown: bool
+    matches: list[SimilarChunk] = field(default_factory=list)
+
+
+def _chunk_segment_for_scoring(segment: SourceSegment) -> list[str]:
+    """Split one planning segment into chunk-sized units for novelty scoring.
+
+    Novelty is judged at ``chunk_size`` -- the same granularity the vault is
+    indexed at -- so source text is compared against vault chunks span-for-span.
+    Querying with a whole (larger) planning segment instead averages its
+    embedding and blurs a genuinely novel passage sitting next to familiar
+    content, which is why scoring and planning granularity are decoupled.
+    """
+    chunks = chunk_text(
+        segment.text,
+        chunk_size=settings.chunk_size,
+        chunk_overlap=settings.chunk_overlap,
+    )
+    texts = [chunk.text for chunk in chunks if chunk.text.strip()]
+    if texts:
+        return texts
+    stripped = segment.text.strip()
+    return [stripped] if stripped else []
+
+
+def _score_segments_via_chunks(
+    segments: list[SourceSegment],
+    vector_store: VectorStore,
+    *,
+    source_tags: list[str] | None,
+    top_k: int,
+    on_batch: Callable[..., None] | None = None,
+) -> tuple[list[SegmentNovelty], list[_ChunkScore], bool]:
+    """Score planning segments at chunk granularity, aggregated per segment.
+
+    Returns ``(segment_scores, chunk_scores, rate_limited)``. Each planning
+    segment gets one aggregated verdict (novel if ANY of its chunks is novel),
+    while ``chunk_scores`` keeps the finer per-chunk detail used for the source
+    verdict and overlap reporting. On an embedding rate limit the remaining
+    chunks are marked unknown (not novel) so a run can still finish.
+    """
+    # Local import avoids a module cycle: atomic_notes imports NoveltyResult.
+    from app.atomic_notes import SegmentNovelty
+
+    nonempty = [segment for segment in segments if segment.text.strip()]
+    if not nonempty:
+        return [], [], False
+
+    if vector_store.chunk_count() == 0:
+        segment_scores = [
+            SegmentNovelty(
+                segment=segment,
+                best_similarity=0.0,
+                is_novel=True,
+                is_unknown=False,
+            )
+            for segment in nonempty
+        ]
+        chunk_scores = [
+            _ChunkScore(
+                segment_pos=pos,
+                text=segment.text,
+                best_similarity=0.0,
+                is_novel=True,
+                is_known=False,
+                is_unknown=False,
+            )
+            for pos, segment in enumerate(nonempty)
+        ]
+        return segment_scores, chunk_scores, False
+
+    chunk_texts: list[str] = []
+    chunk_owner: list[int] = []
+    for pos, segment in enumerate(nonempty):
+        for text in _chunk_segment_for_scoring(segment):
+            chunk_texts.append(text)
+            chunk_owner.append(pos)
+
+    total_chunks = len(chunk_texts)
+    matches_per_chunk: list[list[SimilarChunk] | None] = [None] * total_chunks
+    batch_size = max(1, settings.embedding_query_batch_size)
+    rate_limited = False
+
+    for start in range(0, total_chunks, batch_size):
+        batch_texts = chunk_texts[start : start + batch_size]
+        try:
+            batch_matches = vector_store.query_similar_many(
+                batch_texts, top_k=top_k, query_tags=source_tags
+            )
+        except Exception as exc:  # noqa: BLE001 - rate limits degrade to unknown
+            if not is_rate_limit_error(exc):
+                raise
+            rate_limited = True
+            if on_batch is not None:
+                on_batch(total_chunks, total_chunks, rate_limited=True)
+            break
+        for offset, matches in enumerate(batch_matches):
+            matches_per_chunk[start + offset] = matches
+        if on_batch is not None:
+            on_batch(min(start + len(batch_texts), total_chunks), total_chunks, rate_limited=False)
+
+    chunk_scores = []
+    for pos, text, matches in zip(chunk_owner, chunk_texts, matches_per_chunk, strict=True):
+        if matches is None:
+            chunk_scores.append(
+                _ChunkScore(
+                    segment_pos=pos,
+                    text=text,
+                    best_similarity=0.0,
+                    is_novel=False,
+                    is_known=False,
+                    is_unknown=True,
+                )
+            )
+            continue
+        top = matches[0] if matches else None
+        best_similarity = top.content_similarity if top else 0.0
+        is_novel, is_known = _classify_chunk(
+            best_similarity,
+            query_tags=source_tags,
+            match_tags=top.tags if top else None,
+        )
+        chunk_scores.append(
+            _ChunkScore(
+                segment_pos=pos,
+                text=text,
+                best_similarity=best_similarity,
+                is_novel=is_novel,
+                is_known=is_known,
+                is_unknown=False,
+                matches=matches,
+            )
+        )
+
+    chunks_by_segment: dict[int, list[_ChunkScore]] = {}
+    for chunk in chunk_scores:
+        chunks_by_segment.setdefault(chunk.segment_pos, []).append(chunk)
+
+    segment_scores = []
+    for pos, segment in enumerate(nonempty):
+        reliable = [chunk for chunk in chunks_by_segment.get(pos, []) if not chunk.is_unknown]
+        if not reliable:
+            segment_scores.append(
+                SegmentNovelty(
+                    segment=segment,
+                    best_similarity=0.0,
+                    is_novel=False,
+                    is_unknown=True,
+                )
+            )
+            continue
+        # A segment is novel if ANY chunk carries new content; best_similarity is
+        # its least-covered chunk, so is_novel == best_similarity < NOVEL_THRESHOLD.
+        best_similarity = min(chunk.best_similarity for chunk in reliable)
+        segment_scores.append(
+            SegmentNovelty(
+                segment=segment,
+                best_similarity=best_similarity,
+                is_novel=any(chunk.is_novel for chunk in reliable),
+                is_unknown=False,
+            )
+        )
+
+    return segment_scores, chunk_scores, rate_limited
 
 
 def _aggregate_verdict(novel_count: int, known_count: int, total: int) -> Verdict:
@@ -208,10 +384,13 @@ def analyze_source_similarity(
     source: LoadedSource,
     vector_store: VectorStore,
 ) -> SourceSimilarityAnalysis:
-    """Score planning segments once and derive both verdict and topic scores."""
-    # Local import avoids a module cycle: atomic_notes imports NoveltyResult.
-    from app.atomic_notes import SegmentNovelty
+    """Score a source once and derive both the verdict and per-topic scores.
 
+    Novelty is scored at ``chunk_size`` (matching the vault index) while topics
+    are planned at planning-segment granularity: each planning segment is split
+    into chunks, every chunk is scored, and the chunk verdicts are aggregated
+    back up to their segment for planning.
+    """
     planning_segments = prepare_planning_segments(source)
     if not planning_segments:
         return SourceSimilarityAnalysis(
@@ -227,71 +406,42 @@ def analyze_source_similarity(
             segment_scores=[],
         )
 
-    indexed = vector_store.chunk_count() > 0
     source_tags = list(source.tags) if source.tags else None
-    matches_by_segment: list[list[SimilarChunk] | None] = [
-        [] if not indexed else None for _ in planning_segments
-    ]
-    warnings: list[str] = []
+    segment_scores, chunk_scores, rate_limited = _score_segments_via_chunks(
+        planning_segments,
+        vector_store,
+        source_tags=source_tags,
+        top_k=3,
+    )
 
-    if indexed:
-        batch_size = max(1, settings.embedding_query_batch_size)
-        for start in range(0, len(planning_segments), batch_size):
-            batch = planning_segments[start : start + batch_size]
-            try:
-                batch_matches = vector_store.query_similar_many(
-                    [segment.text.strip() for segment in batch],
-                    top_k=3,
-                    query_tags=source_tags,
-                )
-            except Exception as exc:  # noqa: BLE001 - rate limits degrade to unknown
-                if not is_rate_limit_error(exc):
-                    raise
-                warnings.append(
-                    "Embedding rate limit during similarity scoring; unscored segments "
-                    "were marked unknown (not novel) so the run can continue."
-                )
-                break
-            for offset, matches in enumerate(batch_matches):
-                matches_by_segment[start + offset] = matches
+    warnings: list[str] = []
+    if rate_limited:
+        warnings.append(
+            "Embedding rate limit during similarity scoring; unscored segments "
+            "were marked unknown (not novel) so the run can continue."
+        )
 
     chunk_results: list[ChunkNovelty] = []
-    segment_scores: list[SegmentNovelty] = []
     note_overlap: dict[str, OverlappingNote] = {}
     novel_chunks: list[str] = []
     known_chunks: list[str] = []
     novelty_scores: list[float] = []
     novel_count = 0
     known_count = 0
+    reliable_total = 0
 
-    for segment, maybe_matches in zip(planning_segments, matches_by_segment, strict=True):
-        is_unknown = maybe_matches is None
-        matches = maybe_matches or []
-        if not indexed:
-            best_similarity = 0.0
-            is_novel, is_known = True, False
-        elif is_unknown:
-            best_similarity = 0.0
-            is_novel, is_known = False, False
-        else:
-            top = matches[0] if matches else None
-            best_similarity = top.content_similarity if top else 0.0
-            is_novel, is_known = _classify_chunk(
-                best_similarity,
-                query_tags=source_tags,
-                match_tags=top.tags if top else None,
-            )
-
-        if not is_unknown:
-            novelty_scores.append(1.0 - best_similarity)
-        if is_novel:
+    for index, chunk in enumerate(chunk_scores):
+        if not chunk.is_unknown:
+            reliable_total += 1
+            novelty_scores.append(1.0 - chunk.best_similarity)
+        if chunk.is_novel:
             novel_count += 1
-            novel_chunks.append(segment.text)
-        if is_known:
+            novel_chunks.append(chunk.text)
+        if chunk.is_known:
             known_count += 1
-            known_chunks.append(segment.text)
+            known_chunks.append(chunk.text)
 
-        for match in matches:
+        for match in chunk.matches:
             existing = note_overlap.get(match.note_path)
             if not existing or match.similarity > existing.max_similarity:
                 note_overlap[match.note_path] = OverlappingNote(
@@ -305,24 +455,15 @@ def analyze_source_similarity(
 
         chunk_results.append(
             ChunkNovelty(
-                chunk_index=segment.index,
-                text=segment.text,
-                best_similarity=best_similarity,
-                is_novel=is_novel,
-                is_known=is_known,
-                matches=matches,
-            )
-        )
-        segment_scores.append(
-            SegmentNovelty(
-                segment=segment,
-                best_similarity=best_similarity,
-                is_novel=is_novel,
-                is_unknown=is_unknown,
+                chunk_index=index,
+                text=chunk.text,
+                best_similarity=chunk.best_similarity,
+                is_novel=chunk.is_novel,
+                is_known=chunk.is_known,
+                matches=chunk.matches,
             )
         )
 
-    reliable_total = sum(1 for item in segment_scores if not item.is_unknown)
     verdict = _aggregate_verdict(novel_count, known_count, reliable_total)
     novelty_score = sum(novelty_scores) / len(novelty_scores) if novelty_scores else 1.0
     novelty = NoveltyResult(

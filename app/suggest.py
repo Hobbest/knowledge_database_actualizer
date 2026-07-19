@@ -577,6 +577,40 @@ def _largest_batch_that_fits(
     return 0
 
 
+_BATCH_NOTE_MARKER_RE = re.compile(
+    r"^[ \t]*={2,}\s*NOTE\s*[:#]?\s*(\d+)\s*={2,}[ \t]*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def _strip_batch_fences(body: str) -> str:
+    """Drop a stray code fence a model may wrap a single note body in."""
+    cleaned = body.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[a-zA-Z0-9]*\s*\n?", "", cleaned, count=1)
+        cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1)
+    return cleaned.strip()
+
+
+def _parse_delimited_notes(raw: str) -> dict[str, str]:
+    """Parse '===NOTE <id>===' delimited markdown blocks into id -> body.
+
+    Bodies are raw markdown between markers, so quotes, backslashes, brackets and
+    newlines need no escaping -- the failure mode that made JSON batch replies
+    unparseable whenever a note body contained a `"` or `\\`.
+    """
+    markers = list(_BATCH_NOTE_MARKER_RE.finditer(raw))
+    bodies: dict[str, str] = {}
+    for position, marker in enumerate(markers):
+        note_id = marker.group(1)
+        start = marker.end()
+        end = markers[position + 1].start() if position + 1 < len(markers) else len(raw)
+        body = _strip_batch_fences(raw[start:end])
+        if body and note_id not in bodies:
+            bodies[note_id] = body
+    return bodies
+
+
 def _llm_draft_topics_batch(
     source: LoadedSource,
     topics: list[AtomicTopic],
@@ -586,9 +620,10 @@ def _llm_draft_topics_batch(
 ) -> dict[str, str]:
     """Draft several topics in one LLM call; returns topic id -> body.
 
-    Uses free-form JSON (not provider json_mode): Gemini json_mode often returns
-    empty/blocked payloads for large batches, which previously caused a full
-    batch failure and then expensive per-note LLM retries.
+    The response is delimited markdown (``===NOTE <id>===`` blocks), not JSON, so
+    note bodies never need escaping. A JSON array is still accepted as a fallback
+    for models that ignore the format. Not provider json_mode: Gemini json_mode
+    often returns empty/blocked payloads for large batches.
     """
     provider = get_llm_provider()
     if not provider or not topics:
@@ -623,27 +658,36 @@ def _llm_draft_topics_batch(
     if not raw:
         raise RuntimeError("LLM returned an empty batch draft response")
 
-    title_to_id = {
-        compose_title(topic.title).casefold(): str(index)
-        for index, topic in enumerate(topics)
-    }
-    bodies: dict[str, str] = {}
-    for item in extract_json_array(raw):
-        body = str(item.get("body", "")).strip()
-        if not body:
-            continue
-        topic_id = str(item.get("id", "")).strip()
-        if topic_id and topic_id not in bodies:
-            bodies[topic_id] = body
-            continue
-        if not topic_id:
-            mapped = title_to_id.get(str(item.get("title", "")).strip().casefold())
-            if mapped and mapped not in bodies:
-                bodies[mapped] = body
+    # Primary format: plain-markdown blocks delimited by '===NOTE <id>==='.
+    bodies = _parse_delimited_notes(raw)
+
+    if not bodies:
+        # Back-compat: some models still answer with a JSON array/wrapper.
+        title_to_id = {
+            compose_title(topic.title).casefold(): str(index)
+            for index, topic in enumerate(topics)
+        }
+        try:
+            payload = extract_json_array(raw)
+        except Exception:  # noqa: BLE001 - treated as an unparseable batch below
+            payload = []
+        for item in payload:
+            body = str(item.get("body", "")).strip()
+            if not body:
+                continue
+            topic_id = str(item.get("id", "")).strip()
+            if topic_id and topic_id not in bodies:
+                bodies[topic_id] = body
+                continue
+            if not topic_id:
+                mapped = title_to_id.get(str(item.get("title", "")).strip().casefold())
+                if mapped and mapped not in bodies:
+                    bodies[mapped] = body
+
     if not bodies:
         preview = raw[:200].replace("\n", "\\n")
         raise RuntimeError(
-            f"Batch draft JSON had no usable note bodies (preview={preview!r})"
+            f"Batch draft returned no usable note bodies (preview={preview!r})"
         )
     return bodies
 

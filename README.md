@@ -360,10 +360,13 @@ indexes when you work with more than one vault.
 #### Batch LLM drafting
 
 When `LLM_DRAFT_BATCH_SIZE` is greater than `1`, the note drafter sends several
-topics in a **single LLM call** and expects a JSON array of note bodies back.
-This cuts round-trips on long sources while keeping the same per-note structure
-(frontmatter, Related notes, Source section). Failed or incomplete batches fall
-back to extractive text for the missing notes only — not to N extra LLM calls.
+topics in a **single LLM call**. Each note comes back as a plain-markdown block
+delimited by `===NOTE <id>===` rather than as a JSON string, so bodies that
+contain quotes, backslashes or brackets no longer break parsing and drop a whole
+batch to extractive text (a JSON array is still accepted as a fallback). This
+cuts round-trips on long sources while keeping the same per-note structure.
+Failed or incomplete batches fall back to extractive text for the missing notes
+only — not to N extra LLM calls.
 
 ```bash
 LLM_DRAFT_BATCH_SIZE=3   # draft up to 3 topics per call (default: 3)

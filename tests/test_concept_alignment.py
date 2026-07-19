@@ -80,7 +80,8 @@ def test_batch_prompt_requires_stable_id():
         max_note_lines=40,
     )
     assert '"id"' in prompt
-    assert "Do not swap bodies" in prompt
+    assert "do not swap bodies between ids" in prompt
+    assert "===NOTE <id>===" in prompt
 
 
 def test_llm_draft_topics_batch_matches_by_id(monkeypatch):

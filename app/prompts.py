@@ -111,20 +111,23 @@ def batch_note_draft_prompt(
         f"Source: {_sanitize_untrusted(source.title)} ({source.source_type})\n"
         f"Related notes: {links_text}\n\n"
         f"{wrap_untrusted('concepts and excerpts', topics_json)}\n\n"
-        "Return ONLY valid JSON (no markdown fences, no preamble).\n"
-        "Preferred shape: a JSON array. "
-        'Also accepted: {"notes": [ ... ]}.\n'
-        "Each array item must have:\n"
-        '- "id": must match the input id exactly (string)\n'
-        '- "title": must match the input title exactly\n'
-        '- "body": markdown note body for THAT id only (no YAML frontmatter, no Source '
-        "section; escape every newline inside body as \\n). "
-        "The body must start with '# <title>' and cover only that concept.\n\n"
-        "Requirements:\n"
+        "Output format — return ONLY note blocks in exactly this shape, with no "
+        "JSON, no code fences, and no text before or after:\n\n"
+        "===NOTE <id>===\n"
+        "# <title>\n"
+        "<markdown body for that id only>\n\n"
+        "===NOTE <id>===\n"
+        "# <title>\n"
+        "<markdown body>\n\n"
+        "Rules:\n"
         f"{_format_rules(ATOMIC_NOTE_RULES)}\n"
         f"- Keep each note compact (under {max_note_lines} lines)\n"
-        "- Do not swap bodies between ids\n"
-        "- Finish the full JSON document; do not truncate mid-string\n"
+        "- Start each block with a line '===NOTE <id>===' using the exact id from "
+        "the input, exactly once per concept\n"
+        "- The body after each marker must start with '# <title>' and cover only that concept\n"
+        "- Write the body as ordinary markdown; do NOT escape quotes or newlines and "
+        "do NOT wrap it in JSON\n"
+        "- Emit one block for every id, in the input order; do not swap bodies between ids\n"
     )
 
 
