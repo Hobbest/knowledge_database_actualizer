@@ -6,7 +6,7 @@ from email.message import Message
 from pathlib import Path
 
 import pytest
-from app.config import Settings, settings
+from app.config import Settings
 from app.prompts import (
     UNTRUSTED_CLOSE,
     UNTRUSTED_OPEN,

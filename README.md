@@ -75,8 +75,9 @@ download). CI runs the hermetic `tests/` suite and the client contract tests.
 
 ### Crash / rate-limit recovery
 
-Notes are drafted one at a time (one LLM call each), so a long run can be
-interrupted by an LLM rate limit or a restart. Every note is saved to a
+Notes are drafted in small LLM batches (three per call by default), so a long
+run can still be interrupted by an LLM rate limit or a restart. Draft
+suggestions are saved to a
 checkpoint (`data/checkpoints/<source-key>.json`, tracked in
 `data/checkpoints/manifest.json`) the moment it is created:
 
@@ -92,16 +93,18 @@ checkpoint (`data/checkpoints/<source-key>.json`, tracked in
 - If the last run was left incomplete, a **Continue interrupted run** button
   appears. Re-select the same source and click it to draft only the notes that
   are still missing — notes already saved are reused as-is instead of being
-  regenerated. (API: send `resume=true` to `POST /api/sources/analyze` with the
+  regenerated. The saved novelty result and topic plan are also reused when
+  the source and relevant settings are unchanged, avoiding repeated embedding
+  and planning calls. (API: send `resume=true` to `POST /api/sources/analyze` with the
   same source.) YouTube URLs are matched by video id, so `youtu.be/…` and
   `youtube.com/watch?v=…` count as the same source. If the source does not match
   the checkpoint, the run aborts without clearing saved notes; use **Analyze**
   only when you intend to start fresh (that replaces the checkpoint).
 
-> Tip: drafting makes one LLM call per note, so a whole book can be hundreds of
-> calls and repeatedly hit per-minute quotas. Raise `SEGMENT_TARGET_CHARS` or
-> lower `MAX_NOTES_PER_SOURCE` to reduce the number of calls, or use a model
-> with a higher rate limit.
+> Tip: drafting uses roughly one LLM call per `LLM_DRAFT_BATCH_SIZE` notes,
+> plus an optional planning call. A whole book can still hit per-minute quotas.
+> Raise `SEGMENT_TARGET_CHARS`, raise `LLM_DRAFT_BATCH_SIZE`, or lower
+> `MAX_NOTES_PER_SOURCE` to reduce calls.
 
 ## Configuration
 

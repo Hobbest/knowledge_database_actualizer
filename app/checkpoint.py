@@ -156,6 +156,9 @@ class SuggestionCheckpoint:
             "source": None,
             "suggestions": [],
             "warnings": [],
+            "plan": None,
+            "novelty": None,
+            "plan_fingerprint": None,
         }
 
     @classmethod
@@ -181,6 +184,9 @@ class SuggestionCheckpoint:
         self._state["completed"] = False
         self._state["suggestions"] = []
         self._state["warnings"] = []
+        self._state["plan"] = None
+        self._state["novelty"] = None
+        self._state["plan_fingerprint"] = None
         self._flush()
 
     def resume(
@@ -201,6 +207,19 @@ class SuggestionCheckpoint:
         self._state["completed"] = False
         self._state["suggestions"] = list(suggestions)
         self._state["warnings"] = list(warnings or [])
+        self._flush()
+
+    def set_analysis(
+        self,
+        *,
+        plan: list[dict],
+        novelty: dict,
+        plan_fingerprint: str,
+    ) -> None:
+        """Persist the reusable similarity result and topic plan."""
+        self._state["plan"] = list(plan)
+        self._state["novelty"] = dict(novelty)
+        self._state["plan_fingerprint"] = plan_fingerprint
         self._flush()
 
     def add(self, suggestion: dict) -> None:

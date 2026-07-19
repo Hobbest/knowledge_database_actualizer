@@ -4,7 +4,10 @@ import logging
 import math
 import re
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from functools import lru_cache
+from hashlib import sha1
+from threading import Lock
 
 from app.config import settings
 from app.llm import call_with_retry
@@ -12,6 +15,16 @@ from app.llm import call_with_retry
 logger = logging.getLogger(__name__)
 
 GEMINI_EMBEDDING_BATCH_SIZE = 200
+QUERY_EMBEDDING_CACHE_SIZE = 2048
+_QUERY_EMBEDDING_CACHE: OrderedDict[tuple[str, str, str, str], tuple[float, ...]] = (
+    OrderedDict()
+)
+_QUERY_EMBEDDING_CACHE_LOCK = Lock()
+
+
+def clear_query_embedding_cache() -> None:
+    with _QUERY_EMBEDDING_CACHE_LOCK:
+        _QUERY_EMBEDDING_CACHE.clear()
 
 # Rough chars-per-token for English text, used to convert model token limits
 # into character budgets for CHUNK_SIZE.
@@ -176,12 +189,65 @@ class EmbeddingService:
     def embed_texts(self, texts: list[str], *, task_type: str | None = None) -> list[list[float]]:
         if not texts:
             return []
+        if task_type == "RETRIEVAL_QUERY":
+            return self._embed_query_texts_cached(texts, task_type=task_type)
+        return self._embed_uncached(texts, task_type=task_type)
+
+    def _embed_uncached(
+        self,
+        texts: list[str],
+        *,
+        task_type: str | None = None,
+    ) -> list[list[float]]:
         # Gemini retries per API sub-batch internally; other backends wrap once.
         if isinstance(self._backend, GeminiEmbeddingBackend):
             return self._backend.embed_texts(texts, task_type=task_type)
         return call_with_retry(
             lambda: self._backend.embed_texts(texts, task_type=task_type)
         )
+
+    def _embed_query_texts_cached(
+        self,
+        texts: list[str],
+        *,
+        task_type: str,
+    ) -> list[list[float]]:
+        namespace = (
+            (settings.embedding_provider or "local").lower(),
+            settings.embedding_model or "",
+            task_type,
+        )
+        keys = [(*namespace, sha1(text.encode("utf-8")).hexdigest()) for text in texts]
+        vectors: list[list[float] | None] = [None] * len(texts)
+        misses: dict[tuple[str, str, str, str], tuple[int, str]] = {}
+
+        with _QUERY_EMBEDDING_CACHE_LOCK:
+            for index, key in enumerate(keys):
+                cached = _QUERY_EMBEDDING_CACHE.get(key)
+                if cached is not None:
+                    _QUERY_EMBEDDING_CACHE.move_to_end(key)
+                    vectors[index] = list(cached)
+                elif key not in misses:
+                    misses[key] = (index, texts[index])
+
+        if misses:
+            miss_keys = list(misses)
+            miss_vectors = self._embed_uncached(
+                [misses[key][1] for key in miss_keys],
+                task_type=task_type,
+            )
+            by_key = dict(zip(miss_keys, miss_vectors, strict=True))
+            with _QUERY_EMBEDDING_CACHE_LOCK:
+                for key, vector in by_key.items():
+                    _QUERY_EMBEDDING_CACHE[key] = tuple(vector)
+                    _QUERY_EMBEDDING_CACHE.move_to_end(key)
+                while len(_QUERY_EMBEDDING_CACHE) > QUERY_EMBEDDING_CACHE_SIZE:
+                    _QUERY_EMBEDDING_CACHE.popitem(last=False)
+            for index, key in enumerate(keys):
+                if vectors[index] is None:
+                    vectors[index] = list(by_key[key])
+
+        return [vector for vector in vectors if vector is not None]
 
     def embed_text(self, text: str, *, task_type: str | None = None) -> list[float]:
         return self.embed_texts([text], task_type=task_type)[0]

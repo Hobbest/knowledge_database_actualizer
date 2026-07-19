@@ -4,6 +4,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import TypeVar
 
@@ -80,8 +81,23 @@ _DEFAULT_MAX_OUTPUT_TOKENS = 4096
 _JSON_MAX_OUTPUT_TOKENS = 8192
 
 
+@dataclass(frozen=True)
+class CompletionUsage:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+
 class LLMProvider(ABC):
     @abstractmethod
+    def complete_with_usage(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        json_mode: bool = False,
+    ) -> tuple[str, CompletionUsage | None]:
+        raise NotImplementedError
+
     def complete(
         self,
         prompt: str,
@@ -89,7 +105,22 @@ class LLMProvider(ABC):
         system: str | None = None,
         json_mode: bool = False,
     ) -> str:
-        raise NotImplementedError
+        text, _usage = self.complete_with_usage(prompt, system=system, json_mode=json_mode)
+        return text
+
+
+def complete_with_usage(
+    provider: LLMProvider,
+    prompt: str,
+    *,
+    system: str | None = None,
+    json_mode: bool = False,
+) -> tuple[str, CompletionUsage | None]:
+    """Complete with usage, while supporting legacy/fake providers in tests."""
+    method = getattr(provider, "complete_with_usage", None)
+    if callable(method):
+        return method(prompt, system=system, json_mode=json_mode)
+    return provider.complete(prompt, system=system, json_mode=json_mode), None
 
 
 class OpenAIProvider(LLMProvider):
@@ -99,13 +130,13 @@ class OpenAIProvider(LLMProvider):
         self.client = OpenAI(api_key=api_key)
         self.model = model
 
-    def complete(
+    def complete_with_usage(
         self,
         prompt: str,
         *,
         system: str | None = None,
         json_mode: bool = False,
-    ) -> str:
+    ) -> tuple[str, CompletionUsage | None]:
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -121,7 +152,11 @@ class OpenAIProvider(LLMProvider):
             # OpenAI requires a top-level JSON object when this is set.
             kwargs["response_format"] = {"type": "json_object"}
         response = self.client.chat.completions.create(**kwargs)
-        return response.choices[0].message.content or ""
+        usage = getattr(response, "usage", None)
+        return response.choices[0].message.content or "", CompletionUsage(
+            input_tokens=getattr(usage, "prompt_tokens", None),
+            output_tokens=getattr(usage, "completion_tokens", None),
+        )
 
 
 class AnthropicProvider(LLMProvider):
@@ -131,13 +166,13 @@ class AnthropicProvider(LLMProvider):
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model
 
-    def complete(
+    def complete_with_usage(
         self,
         prompt: str,
         *,
         system: str | None = None,
         json_mode: bool = False,
-    ) -> str:
+    ) -> tuple[str, CompletionUsage | None]:
         response = self.client.messages.create(
             model=self.model,
             max_tokens=_JSON_MAX_OUTPUT_TOKENS if json_mode else _DEFAULT_MAX_OUTPUT_TOKENS,
@@ -149,7 +184,11 @@ class AnthropicProvider(LLMProvider):
         for block in response.content:
             if getattr(block, "type", None) == "text":
                 parts.append(getattr(block, "text", ""))
-        return "\n".join(parts)
+        usage = getattr(response, "usage", None)
+        return "\n".join(parts), CompletionUsage(
+            input_tokens=getattr(usage, "input_tokens", None),
+            output_tokens=getattr(usage, "output_tokens", None),
+        )
 
 
 class GeminiProvider(LLMProvider):
@@ -159,13 +198,13 @@ class GeminiProvider(LLMProvider):
         self.client = genai.Client(api_key=api_key)
         self.model = model
 
-    def complete(
+    def complete_with_usage(
         self,
         prompt: str,
         *,
         system: str | None = None,
         json_mode: bool = False,
-    ) -> str:
+    ) -> tuple[str, CompletionUsage | None]:
         from google.genai import types
 
         config_kwargs: dict = {
@@ -184,7 +223,11 @@ class GeminiProvider(LLMProvider):
             contents=prompt,
             config=config,
         )
-        return response.text or ""
+        usage = getattr(response, "usage_metadata", None)
+        return response.text or "", CompletionUsage(
+            input_tokens=getattr(usage, "prompt_token_count", None),
+            output_tokens=getattr(usage, "candidates_token_count", None),
+        )
 
 
 class OllamaProvider(LLMProvider):
@@ -198,13 +241,13 @@ class OllamaProvider(LLMProvider):
         self.model = model
         self.base_url = base_url
 
-    def complete(
+    def complete_with_usage(
         self,
         prompt: str,
         *,
         system: str | None = None,
         json_mode: bool = False,
-    ) -> str:
+    ) -> tuple[str, CompletionUsage | None]:
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -217,7 +260,11 @@ class OllamaProvider(LLMProvider):
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
         response = self.client.chat.completions.create(**kwargs)
-        return response.choices[0].message.content or ""
+        usage = getattr(response, "usage", None)
+        return response.choices[0].message.content or "", CompletionUsage(
+            input_tokens=getattr(usage, "prompt_tokens", None),
+            output_tokens=getattr(usage, "completion_tokens", None),
+        )
 
 
 def _llm_settings_key() -> tuple:
@@ -268,6 +315,7 @@ def get_llm_provider_uncached() -> LLMProvider | None:
 
 __all__ = [
     "LLMProvider",
+    "CompletionUsage",
     "AnthropicProvider",
     "GeminiProvider",
     "OpenAIProvider",
@@ -278,4 +326,5 @@ __all__ = [
     "is_rate_limit_error",
     "backoff_delay",
     "call_with_retry",
+    "complete_with_usage",
 ]

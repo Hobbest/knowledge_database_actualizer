@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 from app.config import settings
-from app.embeddings import EmbeddingBackend, EmbeddingService, get_embedding_service
+from app.embeddings import (
+    EmbeddingBackend,
+    EmbeddingService,
+    clear_query_embedding_cache,
+    get_embedding_service,
+)
 from app.graph import KnowledgeGraph
 from app.llm import clear_llm_provider_cache
 from app.vectorstore import VectorStore
@@ -58,9 +63,11 @@ def tmp_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(settings, "llm_retry_max_delay", 0.0)
     clear_llm_provider_cache()
     get_embedding_service.cache_clear()
+    clear_query_embedding_cache()
     yield data
     clear_llm_provider_cache()
     get_embedding_service.cache_clear()
+    clear_query_embedding_cache()
 
 
 @pytest.fixture()

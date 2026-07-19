@@ -8,12 +8,12 @@ from typing import TYPE_CHECKING
 
 from app.config import settings
 from app.json_extract import extract_json_array
-from app.llm import call_with_retry, get_llm_provider, is_rate_limit_error
+from app.llm import call_with_retry, complete_with_usage, get_llm_provider, is_rate_limit_error
 from app.novelty import NoveltyResult
 from app.prompts import ARCHITECT_SYSTEM_PROMPT, topic_planning_prompt
 from app.sources.base import LoadedSource, SourceLocation, SourceSegment, merge_locations
-from app.text_limits import TEXT_LIMITS
 from app.summarize import compose_title
+from app.text_limits import TEXT_LIMITS
 from app.text_utils import (
     combine_segment_text,
     extract_topic_summary,
@@ -161,7 +161,13 @@ def plan_atomic_topics(
     novelty_by_index = {item.segment.index: item for item in segment_scores}
     structural_topics = _structural_plan_topics(all_segments)
 
-    llm_topics = _llm_plan_topics(source, all_segments, novelty, budget=budget)
+    llm_topics = _llm_plan_topics(
+        source,
+        all_segments,
+        novelty,
+        structural_count=len(structural_topics),
+        budget=budget,
+    )
     if llm_topics and len(llm_topics) >= _minimum_topic_count(len(all_segments), len(structural_topics)):
         topics = llm_topics
     else:
@@ -354,6 +360,7 @@ def _llm_plan_topics(
     segments: list[SourceSegment],
     novelty: NoveltyResult,
     *,
+    structural_count: int | None = None,
     budget: LLMBudget | None = None,
 ) -> list[AtomicTopic] | None:
     provider = get_llm_provider()
@@ -380,7 +387,9 @@ def _llm_plan_topics(
     if not outline:
         return None
 
-    target_min = _minimum_topic_count(len(segments), len(_structural_plan_topics(segments)))
+    if structural_count is None:
+        structural_count = len(_structural_plan_topics(segments))
+    target_min = _minimum_topic_count(len(segments), structural_count)
     prompt = topic_planning_prompt(
         source=source,
         segment_outline=outline,
@@ -389,14 +398,34 @@ def _llm_plan_topics(
     )
     prompt_chars = len(prompt) + len(ARCHITECT_SYSTEM_PROMPT)
     if budget is not None and not budget.can_call(prompt_chars):
-        budget.refuse(prompt_chars)
-        logger.info("Skipping LLM topic planning: %s", budget.exhausted_reason)
+        # Do not mark the run exhausted: drafting can still use leftover budget
+        # with smaller per-batch prompts.
+        logger.info(
+            "Skipping LLM topic planning: prompt needs %s chars but only %s remain",
+            prompt_chars,
+            budget.remaining_chars,
+        )
         return None
 
+    def planning_attempt() -> str:
+        if budget is not None and not budget.can_call(prompt_chars):
+            raise RuntimeError(
+                "LLM planning prompt no longer fits the remaining input budget"
+            )
+        usage = None
+        try:
+            text, usage = complete_with_usage(
+                provider,
+                prompt,
+                system=ARCHITECT_SYSTEM_PROMPT,
+            )
+            return text
+        finally:
+            if budget is not None:
+                budget.record(prompt_chars, usage)
+
     try:
-        raw = call_with_retry(lambda: provider.complete(prompt, system=ARCHITECT_SYSTEM_PROMPT))
-        if budget is not None:
-            budget.record(prompt_chars)
+        raw = call_with_retry(planning_attempt)
         payload = _extract_json_array(raw)
         if not payload:
             return None

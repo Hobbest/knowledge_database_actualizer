@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from app.config import settings
+from app.llm import CompletionUsage
 
 
 @dataclass
@@ -19,6 +20,9 @@ class LLMBudget:
     max_input_chars: int
     calls: int = 0
     input_chars: int = 0
+    actual_input_tokens: int = 0
+    actual_output_tokens: int = 0
+    calls_with_usage: int = 0
     exhausted_reason: str | None = None
     _warnings: list[str] = field(default_factory=list)
 
@@ -54,9 +58,19 @@ class LLMBudget:
             return False
         return True
 
-    def record(self, prompt_chars: int) -> None:
+    def record(
+        self,
+        prompt_chars: int,
+        usage: CompletionUsage | None = None,
+    ) -> None:
         self.calls += 1
         self.input_chars += max(0, prompt_chars)
+        if usage is not None:
+            has_usage = usage.input_tokens is not None or usage.output_tokens is not None
+            if has_usage:
+                self.calls_with_usage += 1
+            self.actual_input_tokens += max(0, usage.input_tokens or 0)
+            self.actual_output_tokens += max(0, usage.output_tokens or 0)
 
     def refuse(self, prompt_chars: int) -> str:
         """Mark budget exhausted and return a user-facing reason."""
@@ -66,10 +80,20 @@ class LLMBudget:
                 "Remaining notes use extractive summaries."
             )
         elif self.max_input_chars > 0 and self.input_chars + prompt_chars > self.max_input_chars:
-            reason = (
-                f"LLM input budget reached ({self.input_chars:,}/{self.max_input_chars:,} chars). "
-                "Remaining notes use extractive summaries."
-            )
+            leftover = self.remaining_chars
+            if leftover > 0:
+                reason = (
+                    f"LLM input budget cannot fit the next call "
+                    f"({self.input_chars:,}/{self.max_input_chars:,} chars used; "
+                    f"{leftover:,} remaining but next prompt needs {prompt_chars:,}). "
+                    "Remaining notes use extractive summaries."
+                )
+            else:
+                reason = (
+                    f"LLM input budget reached "
+                    f"({self.input_chars:,}/{self.max_input_chars:,} chars). "
+                    "Remaining notes use extractive summaries."
+                )
         else:
             reason = "LLM budget exhausted; remaining notes use extractive summaries."
         self.exhausted_reason = reason
@@ -78,13 +102,17 @@ class LLMBudget:
         return reason
 
     def summary(self) -> dict:
+        estimated_input_tokens = self.input_chars // 4
         return {
             "calls": self.calls,
             "max_calls": self.max_calls,
             "input_chars": self.input_chars,
             "max_input_chars": self.max_input_chars,
             "exhausted": self.exhausted,
-            "estimated_input_tokens": self.input_chars // 4,
+            "estimated_input_tokens": estimated_input_tokens,
+            "actual_input_tokens": self.actual_input_tokens,
+            "actual_output_tokens": self.actual_output_tokens,
+            "calls_with_usage": self.calls_with_usage,
         }
 
     @property

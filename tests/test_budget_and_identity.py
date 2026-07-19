@@ -21,7 +21,9 @@ def test_llm_budget_char_cap():
     assert budget.can_call(40)
     budget.record(40)
     assert not budget.can_call(20)
-    assert "input budget" in budget.refuse(20).lower()
+    reason = budget.refuse(20).lower()
+    assert "cannot fit" in reason or "input budget" in reason
+    assert "10 remaining" in reason
 
 
 def test_recommended_thresholds():

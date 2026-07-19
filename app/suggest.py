@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import re
@@ -22,11 +24,11 @@ from app.atomic_notes import (
     score_segments,
     topic_location,
 )
-from app.json_extract import extract_json_array
 from app.block_refs import inject_block_references
 from app.checkpoint import SuggestionCheckpoint
 from app.config import settings
-from app.llm import call_with_retry, get_llm_provider, is_rate_limit_error
+from app.json_extract import extract_json_array
+from app.llm import call_with_retry, complete_with_usage, get_llm_provider, is_rate_limit_error
 from app.llm_budget import LLMBudget, estimate_run_cost_hint
 from app.media import media_for_location, render_media_section
 from app.note_output import (
@@ -39,12 +41,12 @@ from app.note_output import (
     topic_overlap_match,
     vault_relative_paths_equal,
 )
-from app.novelty import NoveltyResult, OverlappingNote
+from app.novelty import NoveltyResult, OverlappingNote, novelty_to_checkpoint
 from app.prompts import NOTE_WRITER_SYSTEM_PROMPT, batch_note_draft_prompt, note_draft_prompt
 from app.relevance import filter_relevant_segments, is_boilerplate_title, is_low_value_text
 from app.segmentation import split_large_segments
 from app.source_identity import normalize_source_key
-from app.sources.base import LoadedSource, SourceLocation
+from app.sources.base import LoadedSource, SourceLocation, SourceSegment
 from app.summarize import (
     compose_title,
     ensure_concept_heading,
@@ -121,6 +123,63 @@ def _note_identity(segment_indices: list[int], concept_title: str) -> tuple:
     """
     indices = tuple(sorted(int(i) for i in segment_indices))
     return (indices, concept_title.strip().lower())
+
+
+def analysis_fingerprint(source: LoadedSource) -> str:
+    shaping_settings = {
+        "segment_target_chars": settings.segment_target_chars,
+        "filter_boilerplate": settings.filter_boilerplate,
+        "novel_threshold": settings.novel_threshold,
+        "known_threshold": settings.known_threshold,
+        "embedding_provider": settings.embedding_provider,
+        "embedding_model": settings.embedding_model,
+        "tag_similarity_enabled": settings.tag_similarity_enabled,
+        "tag_similarity_boost_per_tag": settings.tag_similarity_boost_per_tag,
+        "tag_similarity_max_boost": settings.tag_similarity_max_boost,
+        "max_notes_per_source": settings.max_notes_per_source,
+        "atomic_note_line_limit": settings.atomic_note_line_limit,
+        "atomic_note_char_limit": settings.atomic_note_char_limit,
+    }
+    payload = json.dumps(shaping_settings, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256()
+    digest.update(source.text.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(payload.encode("utf-8"))
+    return digest.hexdigest()
+
+
+def topics_to_checkpoint(topics: list[AtomicTopic]) -> list[dict]:
+    return [
+        {
+            "title": topic.title,
+            "segment_indices": [segment.index for segment in topic.segments],
+            "summary": topic.summary,
+            "is_novel": topic.is_novel,
+        }
+        for topic in topics
+    ]
+
+
+def topics_from_checkpoint(
+    payload: list[dict],
+    planning_segments: list[SourceSegment],
+) -> list[AtomicTopic]:
+    by_index = {segment.index: segment for segment in planning_segments}
+    topics: list[AtomicTopic] = []
+    for item in payload:
+        indices = item.get("segment_indices") or []
+        segments = [by_index[index] for index in indices if index in by_index]
+        if not segments or len(segments) != len(indices):
+            return []
+        topics.append(
+            AtomicTopic(
+                title=str(item.get("title", "")).strip() or "Untitled concept",
+                segments=segments,
+                summary=str(item.get("summary", "")),
+                is_novel=bool(item.get("is_novel", True)),
+            )
+        )
+    return topics
 
 
 def _related_links(overlapping_notes: list[OverlappingNote]) -> list[str]:
@@ -311,10 +370,78 @@ def _llm_draft_topic_body(
     if budget is not None and not budget.can_call(prompt_chars):
         raise RuntimeError(budget.refuse(prompt_chars))
 
-    text = provider.complete(prompt, system=NOTE_WRITER_SYSTEM_PROMPT).strip() or None
-    if budget is not None and text is not None:
-        budget.record(prompt_chars)
+    usage = None
+    try:
+        raw, usage = complete_with_usage(
+            provider,
+            prompt,
+            system=NOTE_WRITER_SYSTEM_PROMPT,
+        )
+        text = raw.strip() or None
+    finally:
+        if budget is not None:
+            budget.record(prompt_chars, usage)
     return text
+
+
+def _batch_draft_payload(topics: list[AtomicTopic]) -> list[dict]:
+    """Build the JSON payload for a batch draft prompt."""
+    batch_excerpt_chars = min(700, TEXT_LIMITS.note_draft_excerpt_chars)
+    payload: list[dict] = []
+    for index, topic in enumerate(topics):
+        location = topic_location(topic)
+        title = compose_title(topic.title)
+        excerpt = extract_topic_summary(
+            topic.segments,
+            max_chars=batch_excerpt_chars,
+        )
+        item: dict = {
+            "id": str(index),
+            "title": title,
+            "location": location.display(),
+            "excerpt": excerpt,
+        }
+        if topic.summary and topic.summary.strip():
+            item["summary"] = topic.summary.strip()[:400]
+        payload.append(item)
+    return payload
+
+
+def _batch_draft_prompt_chars(
+    source: LoadedSource,
+    topics: list[AtomicTopic],
+    related_links: list[str],
+) -> int:
+    """Estimate input chars for drafting ``topics`` in one batch call."""
+    batch_max_lines = min(30, settings.max_note_lines)
+    prompt = batch_note_draft_prompt(
+        source=source,
+        topics=_batch_draft_payload(topics),
+        related_links=related_links,
+        max_note_lines=batch_max_lines,
+    )
+    return len(prompt) + len(NOTE_WRITER_SYSTEM_PROMPT)
+
+
+def _largest_batch_that_fits(
+    source: LoadedSource,
+    topics: list[AtomicTopic],
+    related_links: list[str],
+    budget: LLMBudget,
+    *,
+    max_size: int,
+) -> int:
+    """Return how many leading topics fit in the remaining input-char budget."""
+    if not topics or max_size < 1:
+        return 0
+    if budget.exhausted or budget.remaining_calls <= 0:
+        return 0
+    take = min(max_size, len(topics))
+    while take > 0:
+        if budget.can_call(_batch_draft_prompt_chars(source, topics[:take], related_links)):
+            return take
+        take -= 1
+    return 0
 
 
 def _llm_draft_topics_batch(
@@ -335,26 +462,8 @@ def _llm_draft_topics_batch(
         return {}
 
     # Keep prompts/outputs small so replies are less likely to truncate.
-    batch_excerpt_chars = min(700, TEXT_LIMITS.note_draft_excerpt_chars)
     batch_max_lines = min(30, settings.max_note_lines)
-
-    payload: list[dict] = []
-    for index, topic in enumerate(topics):
-        location = topic_location(topic)
-        title = compose_title(topic.title)
-        excerpt = extract_topic_summary(
-            topic.segments,
-            max_chars=batch_excerpt_chars,
-        )
-        item: dict = {
-            "id": str(index),
-            "title": title,
-            "location": location.display(),
-            "excerpt": excerpt,
-        }
-        if topic.summary and topic.summary.strip():
-            item["summary"] = topic.summary.strip()[:400]
-        payload.append(item)
+    payload = _batch_draft_payload(topics)
 
     prompt = batch_note_draft_prompt(
         source=source,
@@ -367,11 +476,17 @@ def _llm_draft_topics_batch(
         raise RuntimeError(budget.refuse(prompt_chars))
 
     # Always record the call — provider bills even empty/failed responses.
+    usage = None
     try:
-        raw = provider.complete(prompt, system=NOTE_WRITER_SYSTEM_PROMPT).strip()
+        response, usage = complete_with_usage(
+            provider,
+            prompt,
+            system=NOTE_WRITER_SYSTEM_PROMPT,
+        )
+        raw = response.strip()
     finally:
         if budget is not None:
-            budget.record(prompt_chars)
+            budget.record(prompt_chars, usage)
     if not raw:
         raise RuntimeError("LLM returned an empty batch draft response")
 
@@ -444,17 +559,19 @@ def _plan_topics(
     progress: ProgressFn | None = None,
     warnings: list[str] | None = None,
     budget: LLMBudget | None = None,
+    planning_segments: list[SourceSegment] | None = None,
+    segment_scores: list[SegmentNovelty] | None = None,
 ) -> list[AtomicTopic]:
     # Break large source units (e.g. full PDF pages) into bounded planning units
     # so multi-topic pages are not collapsed into a single note.
-    base_segments = source.segments
-    if settings.filter_boilerplate:
-        base_segments = filter_relevant_segments(base_segments)
-
-    planning_segments = split_large_segments(
-        base_segments,
-        target_chars=settings.segment_target_chars,
-    )
+    if planning_segments is None:
+        base_segments = source.segments
+        if settings.filter_boilerplate:
+            base_segments = filter_relevant_segments(base_segments)
+        planning_segments = split_large_segments(
+            base_segments,
+            target_chars=settings.segment_target_chars,
+        )
 
     indexed = vector_store is not None and vector_store.chunk_count() > 0
     total = len(planning_segments)
@@ -477,7 +594,10 @@ def _plan_topics(
                 warning_sink.append(msg)
             logger.warning(msg)
 
-    if indexed and vector_store is not None:
+    if segment_scores is not None:
+        if progress and total:
+            progress("scoring", total, total, "Reusing precomputed similarity scores")
+    elif indexed and vector_store is not None:
         segment_scores = score_segments(
             planning_segments,
             vector_store,
@@ -660,6 +780,8 @@ def _stream_plan_topics(
     *,
     warnings: list[str],
     budget: LLMBudget,
+    planning_segments: list[SourceSegment] | None = None,
+    segment_scores: list[SegmentNovelty] | None = None,
 ) -> Generator[dict, None, list[AtomicTopic]]:
     """Run topic planning while yielding progress events as they happen.
 
@@ -689,6 +811,8 @@ def _stream_plan_topics(
                 progress=progress,
                 warnings=warnings,
                 budget=budget,
+                planning_segments=planning_segments,
+                segment_scores=segment_scores,
             )
             for message in budget.warnings:
                 if message not in warnings:
@@ -721,6 +845,9 @@ def iter_note_suggestions(
     resume_suggestions: list[dict] | None = None,
     vault_note_path: str | None = None,
     vault_path: Path | None = None,
+    planning_segments: list[SourceSegment] | None = None,
+    segment_scores: list[SegmentNovelty] | None = None,
+    precomputed_topics: list[AtomicTopic] | None = None,
 ) -> Iterator[dict]:
     """Yield progress events while drafting notes; end with a 'suggestions' event.
 
@@ -748,13 +875,25 @@ def iter_note_suggestions(
 
     warnings: list[str] = []
     budget = LLMBudget.from_settings()
-    topics = yield from _stream_plan_topics(
-        source,
-        novelty,
-        vector_store,
-        warnings=warnings,
-        budget=budget,
-    )
+    if precomputed_topics is not None:
+        topics = precomputed_topics
+        yield {
+            "type": "progress",
+            "stage": "scoring",
+            "current": len(topics),
+            "total": len(topics),
+            "message": "Reusing saved similarity scores and topic plan",
+        }
+    else:
+        topics = yield from _stream_plan_topics(
+            source,
+            novelty,
+            vector_store,
+            warnings=warnings,
+            budget=budget,
+            planning_segments=planning_segments,
+            segment_scores=segment_scores,
+        )
 
     if settings.llm_enabled and topics:
         yield {
@@ -773,6 +912,11 @@ def iter_note_suggestions(
             checkpoint.resume(_source_meta(source), resume_suggestions)
         else:
             checkpoint.start(_source_meta(source))
+        checkpoint.set_analysis(
+            plan=topics_to_checkpoint(topics),
+            novelty=novelty_to_checkpoint(novelty),
+            plan_fingerprint=analysis_fingerprint(source),
+        )
 
     suggestions: list[NoteSuggestion] = []
     # Reserve every recovered note's path so freshly drafted notes never collide
@@ -808,31 +952,60 @@ def iter_note_suggestions(
                 continue
             pending.append((identity, topic))
 
-        batch_total = max(1, (len(pending) + batch_size - 1) // batch_size)
-        for batch_index, start in enumerate(range(0, len(pending), batch_size), start=1):
+        # Shrink batches as the char budget runs low so leftover capacity is used
+        # instead of marking the run exhausted on the first oversized batch.
+        cursor = 0
+        batch_index = 0
+        while cursor < len(pending):
             if consecutive_batch_failures >= settings.llm_disable_after_failures:
                 yield record_warning(
                     "Repeated batch draft failures; remaining notes use extractive summaries."
                 )
                 break
+            if budget.exhausted:
+                llm_disabled = True
+                break
 
-            batch = pending[start : start + batch_size]
+            remaining_topics = [item[1] for item in pending[cursor:]]
+            take = _largest_batch_that_fits(
+                source,
+                remaining_topics,
+                related_links,
+                budget,
+                max_size=batch_size,
+            )
+            if take == 0:
+                next_chars = _batch_draft_prompt_chars(
+                    source,
+                    remaining_topics[:1],
+                    related_links,
+                )
+                llm_disabled = True
+                yield record_warning(budget.refuse(next_chars))
+                break
+
+            batch = pending[cursor : cursor + take]
             batch_topics = [item[1] for item in batch]
+            batch_index += 1
+            note_start = cursor + 1
+            note_end = cursor + take
             yield {
                 "type": "progress",
                 "stage": "drafting",
-                "current": min(start + len(batch), total),
+                "current": min(note_end, total),
                 "total": total,
                 "message": (
-                    f"Batch drafting notes {start + 1}-{start + len(batch)} "
-                    f"({batch_index}/{batch_total})"
+                    f"Batch drafting notes {note_start}-{note_end} "
+                    f"(batch {batch_index}, size {take})"
                 ),
             }
             try:
-                def draft_batch() -> dict[str, str]:
+                def draft_batch(
+                    topics_for_call: list[AtomicTopic] = batch_topics,
+                ) -> dict[str, str]:
                     return _llm_draft_topics_batch(
                         source,
-                        batch_topics,
+                        topics_for_call,
                         related_links,
                         budget=budget,
                     )
@@ -849,7 +1022,7 @@ def iter_note_suggestions(
                 if missing:
                     yield record_warning(
                         f"Batch draft returned {filled}/{len(batch)} note bodies for notes "
-                        f"{start + 1}-{start + len(batch)}; missing notes use extractive summaries."
+                        f"{note_start}-{note_end}; missing notes use extractive summaries."
                     )
             except Exception as exc:  # noqa: BLE001
                 consecutive_batch_failures += 1
@@ -858,9 +1031,10 @@ def iter_note_suggestions(
                     yield record_warning(budget.exhausted_reason or str(exc))
                     break
                 yield record_warning(
-                    f"Batch draft failed for notes {start + 1}-{start + len(batch)}; "
+                    f"Batch draft failed for notes {note_start}-{note_end}; "
                     f"those notes use extractive summaries ({exc})."
                 )
+            cursor += take
 
     for position, topic in enumerate(topics, start=1):
         identity = _note_identity(
@@ -1029,11 +1203,16 @@ def iter_note_suggestions(
         checkpoint.finish(completed=True)
 
     if budget.calls:
-        warnings.append(
-            f"LLM usage this run: {budget.calls} call(s), "
-            f"~{budget.input_chars // 4:,} input tokens "
-            f"({budget.input_chars:,} chars)."
-        )
+        if budget.calls_with_usage:
+            usage_text = (
+                f"{budget.actual_input_tokens:,} input / "
+                f"{budget.actual_output_tokens:,} output tokens reported"
+            )
+            if budget.calls_with_usage < budget.calls:
+                usage_text += f" for {budget.calls_with_usage}/{budget.calls} call(s)"
+        else:
+            usage_text = f"~{budget.input_chars // 4:,} estimated input tokens"
+        warnings.append(f"LLM usage this run: {budget.calls} call(s), {usage_text}.")
 
     yield {
         "type": "suggestions",

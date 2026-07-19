@@ -31,16 +31,23 @@ from app.index_meta import (
     stale_note_count,
 )
 from app.note_output import normalize_vault_relative_path
-from app.novelty import NoveltyResult, analyze_novelty
+from app.novelty import (
+    NoveltyResult,
+    analyze_source_similarity,
+    novelty_from_checkpoint,
+    prepare_planning_segments,
+)
 from app.obsidian_uri import obsidian_open_uri, obsidian_uri_available
 from app.runtime import ANALYZE_POOL, INDEX_LOCK, WORKER_POOL
 from app.sources import SourceDispatcher
 from app.suggest import (
     NoteSuggestion,
+    analysis_fingerprint,
     apply_suggestion,
     apply_suggestions,
     iter_note_suggestions,
     preview_suggestion_merge,
+    topics_from_checkpoint,
 )
 from app.text_limits import TEXT_LIMITS
 from app.threshold_calibration import calibrate_thresholds
@@ -349,6 +356,7 @@ def _iter_analyze_events(
         )
 
         resume_suggestions: list[dict] | None = None
+        saved: dict | None = None
         if resume:
             saved = load_checkpoint_for_source(
                 source.source_type,
@@ -422,11 +430,49 @@ def _iter_analyze_events(
 
         # Per-query locking lives in VectorStore; avoid holding INDEX_LOCK across
         # the whole novelty pass so /api/status stays responsive.
-        novelty = analyze_novelty(
-            source.text,
-            active_store,
-            source_tags=list(source.tags) if source.tags else None,
+        planning_segments = None
+        segment_scores = None
+        precomputed_topics = None
+        novelty: NoveltyResult
+        reusable_analysis = bool(
+            resume
+            and saved
+            and saved.get("plan") is not None
+            and saved.get("novelty")
+            and saved.get("plan_fingerprint") == analysis_fingerprint(source)
         )
+        if reusable_analysis:
+            assert saved is not None
+            planning_segments = prepare_planning_segments(source)
+            precomputed_topics = topics_from_checkpoint(
+                saved.get("plan") or [],
+                planning_segments,
+            )
+            if precomputed_topics:
+                novelty = novelty_from_checkpoint(saved["novelty"])
+            else:
+                reusable_analysis = False
+                yield {
+                    "type": "warning",
+                    "message": (
+                        "Saved topic plan no longer maps to the source; recomputing similarity."
+                    ),
+                }
+        elif resume and saved and saved.get("plan"):
+            yield {
+                "type": "warning",
+                "message": (
+                    "Source or analysis settings changed; recomputing similarity and topic plan."
+                ),
+            }
+
+        if not reusable_analysis:
+            similarity = analyze_source_similarity(source, active_store)
+            novelty = similarity.novelty
+            planning_segments = similarity.planning_segments
+            segment_scores = similarity.segment_scores
+            for warning in similarity.warnings:
+                yield {"type": "warning", "message": warning}
 
         suggestions: list[NoteSuggestion] = []
         warnings: list[str] = []
@@ -438,6 +484,9 @@ def _iter_analyze_events(
             resume_suggestions=resume_suggestions,
             vault_note_path=normalized_vault_note,
             vault_path=vault_path,
+            planning_segments=planning_segments,
+            segment_scores=segment_scores,
+            precomputed_topics=precomputed_topics,
         ):
             if event.get("type") == "suggestions":
                 suggestions = event["suggestions"]
