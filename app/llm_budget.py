@@ -94,10 +94,15 @@ class LLMBudget:
 
 def estimate_run_cost_hint(*, note_count: int, planning: bool) -> str:
     """Short human hint shown before/after drafting (not a billing quote)."""
-    calls = note_count + (1 if planning else 0)
+    batch = max(1, settings.llm_draft_batch_size)
+    draft_calls = (note_count + batch - 1) // batch
+    calls = draft_calls + (1 if planning else 0)
     # Very rough free-tier-friendly guidance; not provider-accurate pricing.
-    return (
-        f"Up to ~{calls} LLM call(s) for this run "
-        f"(budget: {settings.llm_max_calls_per_run} calls / "
-        f"{settings.llm_max_input_chars_per_run:,} input chars)."
+    budget_calls = settings.llm_max_calls_per_run
+    budget_chars = settings.llm_max_input_chars_per_run
+    budget_label = (
+        "unlimited"
+        if budget_calls == 0 and budget_chars == 0
+        else f"{budget_calls} calls / {budget_chars:,} input chars"
     )
+    return f"Up to ~{calls} LLM call(s) for this run (budget: {budget_label})."

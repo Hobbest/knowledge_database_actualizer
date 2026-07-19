@@ -12,6 +12,11 @@ class Settings(BaseSettings):
     )
 
     vault_path: Path | None = None
+    # Comma-separated absolute roots. When set, request vault_path must resolve
+    # to a directory equal to or under one of these roots. When empty and
+    # VAULT_PATH is set, only that exact vault is allowed. When both empty,
+    # any existing directory is accepted (local first-run / tests).
+    allowed_vault_roots: str = ""
     data_dir: Path = Path("./data")
 
     # Embeddings: provider for similarity search (separate from LLM note drafting).
@@ -49,6 +54,8 @@ class Settings(BaseSettings):
 
     # Reject uploads larger than this many megabytes (0 = unlimited).
     max_upload_mb: int = 50
+    # Cap outbound web/HTML fetch bodies (0 = unlimited). Separate from uploads.
+    max_fetch_mb: int = 10
 
     # Comma-separated BCP-47 language codes for YouTube transcripts (tried in
     # order). When none match, the loader falls back to the first available
@@ -108,8 +115,10 @@ class Settings(BaseSettings):
     analyze_in_place_enabled: bool = True
 
     # Phase E — quality & cost
-    # Draft N topics per LLM call (1 = one call per note, legacy behavior).
-    llm_draft_batch_size: int = 5
+    # Draft N topics per LLM call (1 = one call per note; no batch phase).
+    # When > 1, failed/missing batch items use extractive fallback — never a
+    # second per-note LLM call (avoids double-spend after parse failures).
+    llm_draft_batch_size: int = 3
     # Keep separate Chroma collections per vault path (switch vaults without rebuild).
     multi_vault_index_enabled: bool = False
     # When appending to an overlapping note, insert under the matched chunk heading.
@@ -125,7 +134,11 @@ class Settings(BaseSettings):
 
     # Optional shared secret. When set, /api/* requires
     # Authorization: Bearer <token> or X-API-Token: <token>.
+    # Required when BIND_HOST is a non-loopback address (e.g. 0.0.0.0 in Docker).
     api_token: str | None = None
+
+    # Uvicorn bind address. Non-loopback values require API_TOKEN at startup.
+    bind_host: str = "127.0.0.1"
 
     # Comma-separated Host header allowlist (DNS-rebinding guard). Add your
     # hostname when serving beyond localhost; empty disables the check.
@@ -167,6 +180,8 @@ class Settings(BaseSettings):
             raise ValueError("LLM_MAX_INPUT_CHARS_PER_RUN must be >= 0 (0 = unlimited)")
         if self.max_upload_mb < 0:
             raise ValueError("MAX_UPLOAD_MB must be >= 0 (0 = unlimited)")
+        if self.max_fetch_mb < 0:
+            raise ValueError("MAX_FETCH_MB must be >= 0 (0 = unlimited)")
         if self.moc_min_notes < 2:
             raise ValueError("MOC_MIN_NOTES must be >= 2")
         if self.tag_similarity_boost_per_tag < 0:
@@ -185,12 +200,53 @@ class Settings(BaseSettings):
             raise ValueError("VAULT_WATCH_DEBOUNCE_SECONDS must be > 0")
         if self.llm_draft_batch_size < 1:
             raise ValueError("LLM_DRAFT_BATCH_SIZE must be >= 1")
+        if self.llm_provider is not None:
+            self.llm_provider = self.llm_provider.strip() or None
+        if self.llm_model is not None:
+            self.llm_model = self.llm_model.strip() or None
+        if self.llm_api_key is not None:
+            self.llm_api_key = self.llm_api_key.strip() or None
         return self
 
     @property
     def allowed_host_set(self) -> frozenset[str]:
         return frozenset(
             host.strip().lower() for host in self.allowed_hosts.split(",") if host.strip()
+        )
+
+    @property
+    def allowed_vault_root_paths(self) -> tuple[Path, ...]:
+        roots: list[Path] = []
+        for raw in self.allowed_vault_roots.split(","):
+            item = raw.strip()
+            if not item:
+                continue
+            roots.append(Path(item).expanduser().resolve())
+        return tuple(roots)
+
+    @staticmethod
+    def is_loopback_bind_host(host: str) -> bool:
+        value = (host or "").strip().lower()
+        if not value:
+            return True
+        if value in {"127.0.0.1", "localhost", "::1", "[::1]"}:
+            return True
+        try:
+            import ipaddress
+
+            return ipaddress.ip_address(value.strip("[]")).is_loopback
+        except ValueError:
+            return False
+
+    def require_api_token_for_bind_host(self) -> None:
+        """Fail fast when binding publicly without an API token."""
+        if self.is_loopback_bind_host(self.bind_host):
+            return
+        if self.api_token and self.api_token.strip():
+            return
+        raise RuntimeError(
+            f"API_TOKEN is required when BIND_HOST={self.bind_host!r} "
+            "(non-loopback). Set a strong token or bind to 127.0.0.1."
         )
 
     @property

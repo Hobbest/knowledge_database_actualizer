@@ -50,6 +50,43 @@ function buildSelectedApplyNotes(suggestions, selectedIndexes, overwrite = false
     .map((item) => buildApplyNote(item, overwrite));
 }
 
+function suggestionPageCount(total, pageSize) {
+  if (pageSize === "all" || !pageSize || pageSize < 1) {
+    return 1;
+  }
+  return Math.max(1, Math.ceil(Number(total) / pageSize));
+}
+
+function suggestionPageSlice(total, page, pageSize) {
+  const count = Math.max(0, Number(total) || 0);
+  if (pageSize === "all" || !pageSize || pageSize < 1) {
+    return { start: 0, end: count, page: 1, pages: 1 };
+  }
+  const pages = suggestionPageCount(count, pageSize);
+  const current = Math.min(Math.max(1, Number(page) || 1), pages);
+  const start = (current - 1) * pageSize;
+  const end = Math.min(count, start + pageSize);
+  return { start, end, page: current, pages };
+}
+
+function isAnalyzeAbortError(error) {
+  if (!error) {
+    return false;
+  }
+  if (error.name === "AbortError") {
+    return true;
+  }
+  return /analysis canceled|The operation was aborted|aborted/i.test(
+    String(error.message || error)
+  );
+}
+
+function makeAnalyzeAbortError() {
+  const err = new Error("Analysis canceled");
+  err.name = "AbortError";
+  return err;
+}
+
 function editorMarkdown(view, selectionOnly = false) {
   const editor = view && view.editor;
   if (!editor) {
@@ -379,7 +416,15 @@ class ActualizerApi {
     return this.request("/api/vault/thresholds/calibrate");
   }
 
-  async analyze({ url, fileBlob, fileName, resume = false, vaultNotePath, onEvent }) {
+  async analyze({
+    url,
+    fileBlob,
+    fileName,
+    resume = false,
+    vaultNotePath,
+    onEvent,
+    signal,
+  }) {
     const multipart = await buildMultipartBody({ url, fileBlob, fileName, resume, vaultNotePath });
     const apiUrl = `${this.apiBase()}/api/sources/analyze`;
     const body = Buffer.from(multipart.body);
@@ -389,21 +434,51 @@ class ActualizerApi {
       "Content-Length": String(body.length),
     };
 
+    if (signal?.aborted) {
+      throw makeAnalyzeAbortError();
+    }
+
     try {
-      return await this._analyzeStreamNode(apiUrl, headers, body, onEvent);
+      return await this._analyzeStreamNode(apiUrl, headers, body, onEvent, signal);
     } catch (err) {
+      if (isAnalyzeAbortError(err) || signal?.aborted) {
+        throw isAnalyzeAbortError(err) ? err : makeAnalyzeAbortError();
+      }
       // Fall back to buffered requestUrl (no live progress events).
-      const text = await this.request("/api/sources/analyze", {
+      // Cancel stops waiting; the underlying requestUrl call may still finish.
+      const requestPromise = this.request("/api/sources/analyze", {
         method: "POST",
         body: multipart.body,
         contentType: multipart.contentType,
         rawText: true,
       });
+      let text;
+      if (!signal) {
+        text = await requestPromise;
+      } else {
+        text = await Promise.race([
+          requestPromise,
+          new Promise((_, reject) => {
+            if (signal.aborted) {
+              reject(makeAnalyzeAbortError());
+              return;
+            }
+            signal.addEventListener(
+              "abort",
+              () => reject(makeAnalyzeAbortError()),
+              { once: true }
+            );
+          }),
+        ]);
+      }
+      if (signal?.aborted) {
+        throw makeAnalyzeAbortError();
+      }
       return parseNdjsonStream(text, onEvent);
     }
   }
 
-  _analyzeStreamNode(apiUrl, headers, body, onEvent) {
+  _analyzeStreamNode(apiUrl, headers, body, onEvent, signal) {
     return new Promise((resolve, reject) => {
       const parsed = new URL(apiUrl);
       const transport = parsed.protocol === "https:" ? https : http;
@@ -411,20 +486,47 @@ class ActualizerApi {
       let result = null;
       let streamError = null;
       let partialSuggestions = [];
+      let settled = false;
+      let req = null;
+
+      const settle = (fn, value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (signal) {
+          signal.removeEventListener("abort", onAbort);
+        }
+        fn(value);
+      };
+
+      const onAbort = () => {
+        try {
+          req?.destroy();
+        } catch (_) {
+          /* ignore */
+        }
+        settle(reject, makeAnalyzeAbortError());
+      };
+
+      if (signal?.aborted) {
+        settle(reject, makeAnalyzeAbortError());
+        return;
+      }
 
       const finish = () => {
         if (streamError) {
           if (partialSuggestions.length) {
             streamError.partialSuggestions = partialSuggestions;
           }
-          reject(streamError);
+          settle(reject, streamError);
           return;
         }
         if (!result) {
-          reject(new Error("No result from analyze stream"));
+          settle(reject, new Error("No result from analyze stream"));
           return;
         }
-        resolve(result);
+        settle(resolve, result);
       };
 
       const handleEvent = (event) => {
@@ -440,7 +542,7 @@ class ActualizerApi {
         }
       };
 
-      const req = transport.request(
+      req = transport.request(
         {
           hostname: parsed.hostname,
           port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
@@ -449,9 +551,14 @@ class ActualizerApi {
           headers,
         },
         (res) => {
+          if (signal?.aborted) {
+            res.resume();
+            settle(reject, makeAnalyzeAbortError());
+            return;
+          }
           if (res.statusCode === 401) {
             res.resume();
-            reject(new Error("API token required or invalid (401)"));
+            settle(reject, new Error("API token required or invalid (401)"));
             return;
           }
           if (res.statusCode >= 400) {
@@ -463,9 +570,9 @@ class ActualizerApi {
             res.on("end", () => {
               try {
                 const payload = JSON.parse(raw);
-                reject(new Error(payload.detail || raw || String(res.statusCode)));
+                settle(reject, new Error(payload.detail || raw || String(res.statusCode)));
               } catch (_) {
-                reject(new Error(raw || String(res.statusCode)));
+                settle(reject, new Error(raw || String(res.statusCode)));
               }
             });
             return;
@@ -473,9 +580,16 @@ class ActualizerApi {
 
           res.setEncoding("utf8");
           res.on("data", (chunk) => {
+            if (signal?.aborted) {
+              return;
+            }
             buffer = consumeNdjsonLines(buffer + chunk, handleEvent);
           });
           res.on("end", () => {
+            if (signal?.aborted) {
+              settle(reject, makeAnalyzeAbortError());
+              return;
+            }
             if (buffer.trim()) {
               consumeNdjsonLines(`${buffer}\n`, handleEvent);
             }
@@ -484,7 +598,17 @@ class ActualizerApi {
         }
       );
 
-      req.on("error", (err) => reject(this.connectionError(err, apiUrl)));
+      if (signal) {
+        signal.addEventListener("abort", onAbort);
+      }
+
+      req.on("error", (err) => {
+        if (signal?.aborted || isAnalyzeAbortError(err)) {
+          settle(reject, makeAnalyzeAbortError());
+          return;
+        }
+        settle(reject, this.connectionError(err, apiUrl));
+      });
       req.write(body);
       req.end();
     });
@@ -511,6 +635,9 @@ class ActualizerView extends ItemView {
     this.calibration = null;
     this.checkpointState = null;
     this.liveDraftNotes = [];
+    this.currentPage = 1;
+    this.pageSize = 10;
+    this._cancelPending = false;
     this._ui = {};
   }
 
@@ -591,6 +718,7 @@ class ActualizerView extends ItemView {
     this.suggestions = [];
     this.selected = new Set();
     this.liveDraftNotes = [];
+    this.currentPage = 1;
   }
 
   applyLiveDrafts(rawSuggestions) {
@@ -648,10 +776,13 @@ class ActualizerView extends ItemView {
     }));
     this.selected = new Set(
       this.suggestions
-        .map((item, index) => (item.is_moc ? null : index))
+        .map((item, index) =>
+          item.is_moc || item.is_novel === false ? null : index
+        )
         .filter((index) => index !== null)
     );
     this.expanded = new Set();
+    this.currentPage = 1;
     this.render();
   }
 
@@ -760,6 +891,14 @@ class ActualizerView extends ItemView {
     });
     analyzeBtn.disabled = this.isAnalyzing;
     analyzeBtn.onclick = () => this.startAnalyze({ resume: false });
+
+    if (this.isAnalyzing) {
+      const cancelBtn = actions.createEl("button", {
+        text: this._cancelPending ? "Canceling…" : "Cancel analysis",
+      });
+      cancelBtn.disabled = this._cancelPending;
+      cancelBtn.onclick = () => this.plugin.cancelAnalyze();
+    }
 
     actions.createEl("button", { text: "Update index" }).onclick = () =>
       this.plugin.indexVault();
@@ -1083,6 +1222,11 @@ class ActualizerView extends ItemView {
         cls: "actualizer-muted",
         text: "Deselected by default: MOCs are optional navigation indexes, not atomic source notes.",
       });
+    } else if (item.is_novel === false) {
+      box.createEl("div", {
+        cls: "actualizer-muted",
+        text: "Deselected by default: this topic looks known or only partially new in your vault. Select it to write or append anyway.",
+      });
     }
 
     const pathRow = box.createEl("div", { cls: "actualizer-field" });
@@ -1233,6 +1377,12 @@ class ActualizerView extends ItemView {
         text: "MOC suggestions start deselected because they are optional navigation notes.",
       });
     }
+    if (this.suggestions.some((item) => !item.is_moc && item.is_novel === false)) {
+      container.createEl("div", {
+        cls: "actualizer-muted",
+        text: "Known / partial topics start deselected; select them to write or append anyway.",
+      });
+    }
 
     const selectionRow = container.createEl("div", { cls: "actualizer-actions" });
     selectionRow.createEl("button", { text: "Select all" }).onclick = () => {
@@ -1245,9 +1395,70 @@ class ActualizerView extends ItemView {
       this.selected = new Set();
       this.render();
     };
+    selectionRow.createEl("button", { text: "Select novel only" }).onclick = () => {
+      this.selected = new Set(
+        this.suggestions
+          .map((item, index) =>
+            item.is_moc || item.is_novel === false ? null : index
+          )
+          .filter((index) => index !== null)
+      );
+      this.render();
+    };
+
+    const pageControls = container.createEl("div", { cls: "actualizer-pager" });
+    const sizeLabel = pageControls.createEl("label", { cls: "actualizer-pager-size" });
+    sizeLabel.createEl("span", { text: "Per page " });
+    const sizeSelect = sizeLabel.createEl("select", { cls: "actualizer-select" });
+    for (const value of [5, 10, 25, 50, "all"]) {
+      const option = sizeSelect.createEl("option", {
+        text: value === "all" ? "All" : String(value),
+        value: String(value),
+      });
+      if (String(this.pageSize) === String(value)) {
+        option.selected = true;
+      }
+    }
+    sizeSelect.onchange = () => {
+      const value = sizeSelect.value;
+      this.pageSize = value === "all" ? "all" : Number(value);
+      this.currentPage = 1;
+      this.render();
+    };
+
+    const slice = suggestionPageSlice(
+      this.suggestions.length,
+      this.currentPage,
+      this.pageSize
+    );
+    this.currentPage = slice.page;
+
+    if (slice.pages > 1) {
+      const prevBtn = pageControls.createEl("button", { text: "Prev" });
+      prevBtn.disabled = slice.page <= 1;
+      prevBtn.onclick = () => {
+        this.currentPage = Math.max(1, this.currentPage - 1);
+        this.render();
+      };
+      pageControls.createEl("span", {
+        cls: "actualizer-muted actualizer-pager-label",
+        text: `Page ${slice.page} of ${slice.pages} (notes ${slice.start + 1}–${slice.end} of ${this.suggestions.length})`,
+      });
+      const nextBtn = pageControls.createEl("button", { text: "Next" });
+      nextBtn.disabled = slice.page >= slice.pages;
+      nextBtn.onclick = () => {
+        this.currentPage = Math.min(slice.pages, this.currentPage + 1);
+        this.render();
+      };
+    } else if (this.suggestions.length) {
+      pageControls.createEl("span", {
+        cls: "actualizer-muted actualizer-pager-label",
+        text: `${this.suggestions.length} note(s)`,
+      });
+    }
 
     const list = container.createEl("div", { cls: "actualizer-suggestion-list" });
-    for (let i = 0; i < this.suggestions.length; i += 1) {
+    for (let i = slice.start; i < slice.end; i += 1) {
       this.renderSuggestion(list, this.suggestions[i], i);
     }
 
@@ -1259,6 +1470,7 @@ class ActualizerView extends ItemView {
       this.result = null;
       this.suggestions = [];
       this.selected = new Set();
+      this.currentPage = 1;
       this.writeStatus = "";
       this.render();
     };
@@ -1541,6 +1753,7 @@ class KnowledgeDatabaseActualizerPlugin extends Plugin {
     this.api = new ActualizerApi(this);
     this.lastAnalyzeContext = null;
     this._checkpointPollTimer = null;
+    this._activeAnalyzeController = null;
 
     this.registerView(VIEW_TYPE, (leaf) => new ActualizerView(leaf, this));
 
@@ -1591,12 +1804,23 @@ class KnowledgeDatabaseActualizerPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "actualizer-cancel-analyze",
+      name: "Cancel analysis",
+      callback: () => this.cancelAnalyze(),
+    });
+
+    this.addCommand({
       id: "actualizer-open-sidebar",
       name: "Open Actualizer sidebar",
       callback: () => this.activateView(),
     });
 
     this.addSettingTab(new ActualizerSettingTab(this.app, this));
+  }
+
+  onunload() {
+    this.cancelAnalyze({ silent: true });
+    this.stopCheckpointPoll();
   }
 
   async loadSettings() {
@@ -1767,10 +1991,37 @@ class KnowledgeDatabaseActualizerPlugin extends Plugin {
     new Notice(`Re-indexed vault (${stale} stale note(s))`);
   }
 
+  cancelAnalyze({ silent = false } = {}) {
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0];
+    const view = leaf?.view;
+    if (view instanceof ActualizerView && view.isAnalyzing) {
+      view._cancelPending = true;
+      view.render();
+    }
+    if (this._activeAnalyzeController) {
+      this._activeAnalyzeController.abort();
+      if (!silent) {
+        new Notice("Canceling analysis…");
+      }
+      return true;
+    }
+    if (!silent) {
+      new Notice("No analysis is running");
+    }
+    return false;
+  }
+
   async runAnalyze(payload, { resume = false, label = "Analyzing..." } = {}) {
+    if (this._activeAnalyzeController) {
+      new Notice("An analysis is already running — cancel it first");
+      return;
+    }
     const view = (await this.activateView()) || (await this.getView());
+    const controller = new AbortController();
+    this._activeAnalyzeController = controller;
     if (view) {
       view.isAnalyzing = true;
+      view._cancelPending = false;
       view.analyzeError = "";
       view.liveDraftNotes = [];
       if (!resume) {
@@ -1784,10 +2035,17 @@ class KnowledgeDatabaseActualizerPlugin extends Plugin {
       if (!resume) {
         await this.ensureFreshIndex();
       }
+      if (controller.signal.aborted) {
+        throw makeAnalyzeAbortError();
+      }
       const result = await this.api.analyze({
         ...payload,
         resume,
+        signal: controller.signal,
         onEvent: (event) => {
+          if (controller.signal.aborted) {
+            return;
+          }
           if (view && event.type === "progress") {
             view.setProgress(event.message || "Working...", event);
             if (event.stage === "drafting") {
@@ -1799,6 +2057,9 @@ class KnowledgeDatabaseActualizerPlugin extends Plugin {
           }
         },
       });
+      if (controller.signal.aborted) {
+        throw makeAnalyzeAbortError();
+      }
       if (view) {
         view.setResult(result);
         await view.refreshCheckpointState();
@@ -1808,32 +2069,52 @@ class KnowledgeDatabaseActualizerPlugin extends Plugin {
     } catch (err) {
       if (view) {
         view.isAnalyzing = false;
+        view._cancelPending = false;
         view.progress = "";
         view.progressEvent = null;
         view.liveDraftNotes = [];
-        view.analyzeError = err.message || String(err);
-        if (err.partialSuggestions?.length) {
-          view.setResult({
-            source: {},
-            novelty: {
-              verdict: "Partial",
-              overlapping_notes: [],
-              novel_chunks: [],
-              known_chunks: [],
-            },
-            suggestions: err.partialSuggestions,
-            warnings: [
-              ...(view.warnings || []),
-              `Generation stopped early (${err.message}). Recovered ${err.partialSuggestions.length} saved note(s).`,
-            ],
-          });
-        } else {
+        if (isAnalyzeAbortError(err)) {
+          view.clearResult();
+          view.analyzeError =
+            "Analysis canceled. Use Recover/Continue if checkpoint notes were already saved.";
           view.render();
+          await view.refreshCheckpointState();
+          new Notice("Analysis canceled");
+        } else {
+          view.analyzeError = err.message || String(err);
+          if (err.partialSuggestions?.length) {
+            view.setResult({
+              source: {},
+              novelty: {
+                verdict: "Partial",
+                overlapping_notes: [],
+                novel_chunks: [],
+                known_chunks: [],
+              },
+              suggestions: err.partialSuggestions,
+              warnings: [
+                ...(view.warnings || []),
+                `Generation stopped early (${err.message}). Recovered ${err.partialSuggestions.length} saved note(s).`,
+              ],
+            });
+          } else {
+            view.render();
+          }
+          await view.refreshCheckpointState();
+          new Notice(`Analyze failed: ${err.message}`);
         }
-        await view.refreshCheckpointState();
+      } else if (isAnalyzeAbortError(err)) {
+        new Notice("Analysis canceled");
+      } else {
+        new Notice(`Analyze failed: ${err.message}`);
       }
-      new Notice(`Analyze failed: ${err.message}`);
     } finally {
+      if (this._activeAnalyzeController === controller) {
+        this._activeAnalyzeController = null;
+      }
+      if (view) {
+        view._cancelPending = false;
+      }
       this.stopCheckpointPoll();
     }
   }

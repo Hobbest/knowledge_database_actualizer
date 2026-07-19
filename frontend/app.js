@@ -600,7 +600,7 @@ function updateSuggestionCount() {
 function renderSuggestions(suggestions) {
   currentSuggestions = (suggestions || []).map((item) => ({
     ...item,
-    selected: item.is_moc ? false : item.selected !== false,
+    selected: item.is_moc || item.is_novel === false ? false : item.selected !== false,
     write_mode: item.write_mode || "write",
   }));
   currentPage = 1;
@@ -637,6 +637,10 @@ function renderSuggestionsPage() {
     const mocBadge = suggestion.is_moc
       ? '<span class="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">MOC</span>'
       : "";
+    const knownBadge =
+      !suggestion.is_moc && suggestion.is_novel === false
+        ? '<span class="text-xs px-2 py-0.5 rounded-full bg-slate-200 text-slate-700">Known / partial</span>'
+        : "";
     const appendSectionHint =
       suggestion.append_heading && suggestion.write_mode === "append"
         ? `<div class="text-xs text-slate-500">Appending under section: <code>${escapeHtml(suggestion.append_heading)}</code></div>`
@@ -672,6 +676,7 @@ function renderSuggestionsPage() {
           <input type="checkbox" data-index="${index}" class="suggestion-select" />
           <span>#${index + 1} · ${escapeHtml(suggestion.concept_title)}</span>
           ${mocBadge}
+          ${knownBadge}
         </label>
         <span class="text-xs px-2 py-1 rounded-full bg-white border text-slate-600 whitespace-nowrap">
           ${escapeHtml(suggestion.location?.display || "unknown location")}

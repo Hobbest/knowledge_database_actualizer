@@ -18,11 +18,11 @@ import yaml
 from app.atomic_notes import (
     AtomicTopic,
     SegmentNovelty,
-    _extract_json_array,
     plan_atomic_topics,
     score_segments,
     topic_location,
 )
+from app.json_extract import extract_json_array
 from app.block_refs import inject_block_references
 from app.checkpoint import SuggestionCheckpoint
 from app.config import settings
@@ -45,7 +45,13 @@ from app.relevance import filter_relevant_segments, is_boilerplate_title, is_low
 from app.segmentation import split_large_segments
 from app.source_identity import normalize_source_key
 from app.sources.base import LoadedSource, SourceLocation
-from app.summarize import compose_title, key_points, refine_note_body, summarize_text
+from app.summarize import (
+    compose_title,
+    ensure_concept_heading,
+    key_points,
+    refine_note_body,
+    summarize_text,
+)
 from app.text_limits import TEXT_LIMITS
 from app.text_utils import combine_segment_text, extract_topic_summary
 from app.vectorstore import VectorStore
@@ -69,6 +75,9 @@ class NoteSuggestion:
     append_heading: str | None = None
     overlap_similarity: float | None = None
     is_moc: bool = False
+    # True when any reliably scored segment looked novel vs the vault.
+    # False (known/partial/unknown) → UI default-deselects; drafting still runs.
+    is_novel: bool = True
 
     def to_dict(self) -> dict:
         return {
@@ -82,6 +91,7 @@ class NoteSuggestion:
             "append_heading": self.append_heading,
             "overlap_similarity": self.overlap_similarity,
             "is_moc": self.is_moc,
+            "is_novel": self.is_novel,
         }
 
     @classmethod
@@ -97,6 +107,9 @@ class NoteSuggestion:
             append_heading=data.get("append_heading"),
             overlap_similarity=data.get("overlap_similarity"),
             is_moc=bool(data.get("is_moc")),
+            # Missing key (older checkpoints) → treat as novel so we do not
+            # surprise-deselect recovered drafts.
+            is_novel=bool(data["is_novel"]) if "is_novel" in data else True,
         )
 
 
@@ -275,13 +288,20 @@ def _llm_draft_topic_body(
         return None
 
     location = topic_location(topic)
+    title = compose_title(topic.title)
     excerpt = extract_topic_summary(
         topic.segments,
         max_chars=TEXT_LIMITS.note_draft_excerpt_chars,
     )
+    if topic.summary and topic.summary.strip() not in excerpt:
+        # Prefer the planner summary as concept intent; keep excerpt for evidence.
+        excerpt = (
+            f"Concept summary: {topic.summary.strip()}\n\n"
+            f"Source excerpt:\n{excerpt}"
+        )
     prompt = note_draft_prompt(
         source=source,
-        concept_title=topic.title,
+        concept_title=title,
         location_display=location.display(),
         excerpt=excerpt,
         related_links=related_links,
@@ -304,46 +324,79 @@ def _llm_draft_topics_batch(
     *,
     budget: LLMBudget | None = None,
 ) -> dict[str, str]:
-    """Draft several topics in one LLM call; returns title -> body."""
+    """Draft several topics in one LLM call; returns topic id -> body.
+
+    Uses free-form JSON (not provider json_mode): Gemini json_mode often returns
+    empty/blocked payloads for large batches, which previously caused a full
+    batch failure and then expensive per-note LLM retries.
+    """
     provider = get_llm_provider()
     if not provider or not topics:
         return {}
 
+    # Keep prompts/outputs small so replies are less likely to truncate.
+    batch_excerpt_chars = min(700, TEXT_LIMITS.note_draft_excerpt_chars)
+    batch_max_lines = min(30, settings.max_note_lines)
+
     payload: list[dict] = []
-    for topic in topics:
+    for index, topic in enumerate(topics):
         location = topic_location(topic)
+        title = compose_title(topic.title)
         excerpt = extract_topic_summary(
             topic.segments,
-            max_chars=TEXT_LIMITS.note_draft_excerpt_chars,
+            max_chars=batch_excerpt_chars,
         )
-        payload.append(
-            {
-                "title": compose_title(topic.title),
-                "location": location.display(),
-                "excerpt": excerpt,
-            }
-        )
+        item: dict = {
+            "id": str(index),
+            "title": title,
+            "location": location.display(),
+            "excerpt": excerpt,
+        }
+        if topic.summary and topic.summary.strip():
+            item["summary"] = topic.summary.strip()[:400]
+        payload.append(item)
 
     prompt = batch_note_draft_prompt(
         source=source,
         topics=payload,
         related_links=related_links,
-        max_note_lines=settings.max_note_lines,
+        max_note_lines=batch_max_lines,
     )
     prompt_chars = len(prompt) + len(NOTE_WRITER_SYSTEM_PROMPT)
     if budget is not None and not budget.can_call(prompt_chars):
         raise RuntimeError(budget.refuse(prompt_chars))
 
-    raw = provider.complete(prompt, system=NOTE_WRITER_SYSTEM_PROMPT).strip()
-    if budget is not None and raw:
-        budget.record(prompt_chars)
+    # Always record the call — provider bills even empty/failed responses.
+    try:
+        raw = provider.complete(prompt, system=NOTE_WRITER_SYSTEM_PROMPT).strip()
+    finally:
+        if budget is not None:
+            budget.record(prompt_chars)
+    if not raw:
+        raise RuntimeError("LLM returned an empty batch draft response")
 
+    title_to_id = {
+        compose_title(topic.title).casefold(): str(index)
+        for index, topic in enumerate(topics)
+    }
     bodies: dict[str, str] = {}
-    for item in _extract_json_array(raw or ""):
-        title = str(item.get("title", "")).strip()
+    for item in extract_json_array(raw):
         body = str(item.get("body", "")).strip()
-        if title and body:
-            bodies[title.casefold()] = body
+        if not body:
+            continue
+        topic_id = str(item.get("id", "")).strip()
+        if topic_id and topic_id not in bodies:
+            bodies[topic_id] = body
+            continue
+        if not topic_id:
+            mapped = title_to_id.get(str(item.get("title", "")).strip().casefold())
+            if mapped and mapped not in bodies:
+                bodies[mapped] = body
+    if not bodies:
+        preview = raw[:200].replace("\n", "\\n")
+        raise RuntimeError(
+            f"Batch draft JSON had no usable note bodies (preview={preview!r})"
+        )
     return bodies
 
 
@@ -522,6 +575,8 @@ def _build_suggestion(
     # Single refinement pass gives LLM and extractive notes the same consistent
     # structure (heading spacing, deduped bullets, no ragged blank lines).
     body = refine_note_body(body)
+    # Keep frontmatter concept and body H1 aligned (LLM drafts often diverge).
+    body = ensure_concept_heading(body, title)
 
     # Attach any tables/figures that live on this note's page or line range.
     if settings.include_media and source.media and "## Tables & figures" not in body:
@@ -582,6 +637,7 @@ def _build_suggestion(
         append_target=append_target,
         append_heading=append_heading,
         overlap_similarity=overlap_similarity,
+        is_novel=bool(topic.is_novel),
     )
     _apply_analyze_in_place(suggestion, vault_note_path)
     return suggestion
@@ -737,7 +793,12 @@ def iter_note_suggestions(
 
     batch_bodies: dict[tuple, str] = {}
     batch_size = max(1, settings.llm_draft_batch_size)
-    if batch_size > 1 and not llm_disabled and get_llm_provider():
+    # When batch size > 1, LLM drafting happens only in the batch phase.
+    # Missing/failed items use extractive bodies — never a second per-note call.
+    batch_mode = batch_size > 1
+    consecutive_batch_failures = 0
+
+    if batch_mode and not llm_disabled and get_llm_provider():
         pending: list[tuple[tuple, AtomicTopic]] = []
         for topic in topics:
             identity = _note_identity(
@@ -747,7 +808,14 @@ def iter_note_suggestions(
                 continue
             pending.append((identity, topic))
 
+        batch_total = max(1, (len(pending) + batch_size - 1) // batch_size)
         for batch_index, start in enumerate(range(0, len(pending), batch_size), start=1):
+            if consecutive_batch_failures >= settings.llm_disable_after_failures:
+                yield record_warning(
+                    "Repeated batch draft failures; remaining notes use extractive summaries."
+                )
+                break
+
             batch = pending[start : start + batch_size]
             batch_topics = [item[1] for item in batch]
             yield {
@@ -757,7 +825,7 @@ def iter_note_suggestions(
                 "total": total,
                 "message": (
                     f"Batch drafting notes {start + 1}-{start + len(batch)} "
-                    f"({batch_index}/{(len(pending) + batch_size - 1) // batch_size})"
+                    f"({batch_index}/{batch_total})"
                 ),
             }
             try:
@@ -770,20 +838,29 @@ def iter_note_suggestions(
                     )
 
                 bodies = call_with_retry(draft_batch)
-                for (identity, topic) in batch:
-                    title = compose_title(topic.title)
-                    body = bodies.get(title.casefold())
+                filled = 0
+                for offset, (identity, _topic) in enumerate(batch):
+                    body = bodies.get(str(offset))
                     if body:
                         batch_bodies[identity] = body
+                        filled += 1
+                consecutive_batch_failures = 0
+                missing = len(batch) - filled
+                if missing:
+                    yield record_warning(
+                        f"Batch draft returned {filled}/{len(batch)} note bodies for notes "
+                        f"{start + 1}-{start + len(batch)}; missing notes use extractive summaries."
+                    )
             except Exception as exc:  # noqa: BLE001
+                consecutive_batch_failures += 1
                 if budget.exhausted:
                     llm_disabled = True
                     yield record_warning(budget.exhausted_reason or str(exc))
-                else:
-                    yield record_warning(
-                        f"Batch draft failed for notes {start + 1}-{start + len(batch)}; "
-                        f"falling back to per-note drafting ({exc})."
-                    )
+                    break
+                yield record_warning(
+                    f"Batch draft failed for notes {start + 1}-{start + len(batch)}; "
+                    f"those notes use extractive summaries ({exc})."
+                )
 
     for position, topic in enumerate(topics, start=1):
         identity = _note_identity(
@@ -832,8 +909,10 @@ def iter_note_suggestions(
             )
 
         pre_body = batch_bodies.get(identity)
+        # Per-note LLM only when batch drafting is off (size == 1).
+        use_llm_for_note = (not batch_mode) and (not llm_disabled)
 
-        if not llm_disabled:
+        if use_llm_for_note:
             def draft_worker() -> None:
                 try:
                     draft_result["suggestion"] = call_with_retry(

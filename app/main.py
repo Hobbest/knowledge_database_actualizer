@@ -58,6 +58,9 @@ _chunk_error = chunk_size_error()
 if _chunk_error:
     raise RuntimeError(_chunk_error)
 
+# Refuse public binds without a token (Docker / 0.0.0.0).
+settings.require_api_token_for_bind_host()
+
 # The SPA is served same-origin from this app, so no CORS middleware exists on
 # purpose: browsers then refuse cross-origin reads and preflighted requests from
 # other websites. The Host allowlist below additionally blocks DNS-rebinding
@@ -174,6 +177,20 @@ class RefreshNotesRequest(BaseModel):
     note_paths: list[str] = Field(default_factory=list)
 
 
+def _vault_path_permitted(vault_path: Path) -> bool:
+    """Whether ``vault_path`` is allowed by ALLOWED_VAULT_ROOTS / VAULT_PATH policy."""
+    resolved = vault_path.resolve()
+    roots = settings.allowed_vault_root_paths
+    if roots:
+        return any(
+            resolved == root or resolved.is_relative_to(root) for root in roots
+        )
+    if settings.vault_path is not None:
+        configured = settings.vault_path.expanduser().resolve()
+        return resolved == configured
+    return True
+
+
 def _resolve_vault_path(requested: str | None = None) -> Path:
     """Prefer an explicit path (UI / request), else the configured settings path."""
     raw = (requested or "").strip() or None
@@ -188,6 +205,14 @@ def _resolve_vault_path(requested: str | None = None) -> Path:
         )
     if not vault_path.is_dir():
         raise HTTPException(status_code=400, detail=f"Vault path does not exist: {vault_path}")
+    if not _vault_path_permitted(vault_path):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Vault path is not allowed. Set ALLOWED_VAULT_ROOTS to a parent "
+                "directory, or use the configured VAULT_PATH."
+            ),
+        )
     return vault_path
 
 
@@ -627,13 +652,10 @@ async def set_vault_watch(request: VaultWatchRequest):
 
 @app.post("/api/vault/index")
 async def index_vault(request: VaultIndexRequest):
-    vault_path = Path(request.vault_path) if request.vault_path else settings.vault_path
-    if not vault_path:
-        raise HTTPException(status_code=400, detail="vault_path is required")
-
-    vault_path = vault_path.resolve()
-    if not vault_path.is_dir():
-        raise HTTPException(status_code=400, detail=f"Vault path does not exist: {vault_path}")
+    try:
+        vault_path = _resolve_vault_path(request.vault_path)
+    except HTTPException:
+        raise
 
     if request.if_stale:
         stale = stale_note_count(vault_path)
@@ -678,6 +700,8 @@ def get_vault_note(note_path: str, vault_path: str | None = None):
         target = _resolve_vault_target(vault, note_path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if target.suffix.lower() != ".md":
+        raise HTTPException(status_code=400, detail="Only .md notes can be read")
     rel = target.relative_to(vault.resolve()).as_posix()
     if not target.is_file():
         return {"exists": False, "note_path": rel, "content": ""}
@@ -879,7 +903,12 @@ if FRONTEND_DIR.exists():
 def run() -> None:
     import uvicorn
 
-    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=False)
+    uvicorn.run(
+        "app.main:app",
+        host=settings.bind_host,
+        port=8000,
+        reload=False,
+    )
 
 
 if __name__ == "__main__":

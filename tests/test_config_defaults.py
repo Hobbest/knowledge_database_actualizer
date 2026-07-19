@@ -78,6 +78,14 @@ def test_default_upload_limit_is_conservative():
     assert Settings.model_fields["max_upload_mb"].default == 50
 
 
+def test_default_fetch_limit_is_conservative():
+    assert Settings.model_fields["max_fetch_mb"].default == 10
+
+
+def test_default_bind_host_is_loopback():
+    assert Settings.model_fields["bind_host"].default == "127.0.0.1"
+
+
 def test_max_embedding_input_chars_unknown_model_is_none():
     assert max_embedding_input_chars("local", "some-unknown-model") is None
 

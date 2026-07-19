@@ -6,7 +6,10 @@ const {
   buildSelectedApplyNotes,
   consumeNdjsonLines,
   editorMarkdown,
+  isAnalyzeAbortError,
   parseNdjsonStream,
+  suggestionPageCount,
+  suggestionPageSlice,
 } = require("./core");
 
 test("NDJSON parser preserves partial lines between chunks", () => {
@@ -78,4 +81,33 @@ test("editor content and selection come from the live buffer", () => {
 
   assert.equal(editorMarkdown(view), "unsaved **Markdown**");
   assert.equal(editorMarkdown(view, true), "[[Selected note]]");
+});
+
+test("suggestion pagination slices pages like the web UI", () => {
+  assert.equal(suggestionPageCount(25, 10), 3);
+  assert.deepEqual(suggestionPageSlice(25, 2, 10), {
+    start: 10,
+    end: 20,
+    page: 2,
+    pages: 3,
+  });
+  assert.deepEqual(suggestionPageSlice(5, 9, 10), {
+    start: 0,
+    end: 5,
+    page: 1,
+    pages: 1,
+  });
+  assert.deepEqual(suggestionPageSlice(12, 1, "all"), {
+    start: 0,
+    end: 12,
+    page: 1,
+    pages: 1,
+  });
+});
+
+test("analyze abort errors are detected", () => {
+  const abort = new Error("Analysis canceled");
+  abort.name = "AbortError";
+  assert.equal(isAnalyzeAbortError(abort), true);
+  assert.equal(isAnalyzeAbortError(new Error("boom")), false);
 });

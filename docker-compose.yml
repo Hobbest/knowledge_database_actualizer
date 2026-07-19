@@ -6,10 +6,15 @@ services:
     environment:
       VAULT_PATH: /vault
       DATA_DIR: /data
-      API_TOKEN: ${API_TOKEN:-}
+      BIND_HOST: "0.0.0.0"
+      # Required when binding to 0.0.0.0 — compose fails if unset.
+      API_TOKEN: ${API_TOKEN:?Set API_TOKEN in the environment before starting Docker}
+      ALLOWED_VAULT_ROOTS: /vault
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1,[::1]}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
+      MAX_FETCH_MB: ${MAX_FETCH_MB:-10}
     volumes:
       - ./data:/data
-      - ${VAULT_PATH:-./sample_vault}:/vault:ro
+      # Read-write so Apply / write-to-vault works. Keep backups of important vaults.
+      - ${VAULT_PATH:-./sample_vault}:/vault
     restart: unless-stopped

@@ -24,4 +24,8 @@ EXPOSE 8000
 
 VOLUME ["/data", "/vault"]
 
+# BIND_HOST must match uvicorn --host so startup rejects empty API_TOKEN.
+ENV BIND_HOST=0.0.0.0 \
+    ALLOWED_VAULT_ROOTS=/vault
+
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

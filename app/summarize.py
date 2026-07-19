@@ -181,6 +181,28 @@ _BULLET = re.compile(r"^[-*]\s+(.*)$")
 _HEADING = re.compile(r"^#{1,6}\s+\S")
 
 
+def ensure_concept_heading(body: str, title: str) -> str:
+    """Force the note body to start with ``# {title}`` (replace or prepend H1)."""
+    concept = (title or "").strip() or "Untitled concept"
+    text = (body or "").replace("\r\n", "\n").lstrip("\n")
+    if not text.strip():
+        return f"# {concept}\n"
+
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Single-# heading only (not ## / ###).
+        if stripped.startswith("#") and not stripped.startswith("##"):
+            lines[index] = f"# {concept}"
+            return "\n".join(lines).rstrip() + "\n"
+        # First non-empty line is not an H1 — prepend one.
+        break
+
+    return f"# {concept}\n\n{text.lstrip()}".rstrip() + "\n"
+
+
 def refine_note_body(body: str) -> str:
     """Final consistency pass over a composed note body.
 

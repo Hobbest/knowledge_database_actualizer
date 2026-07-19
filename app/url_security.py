@@ -13,10 +13,15 @@ from typing import Protocol, cast
 
 MAX_REDIRECTS = 5
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_READ_CHUNK_BYTES = 64 * 1024
 
 
 class UnsafeURLError(ValueError):
     """Raised when an outbound URL could reach a non-public network."""
+
+
+class FetchSizeError(UnsafeURLError):
+    """Raised when an outbound response exceeds the configured size limit."""
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -114,6 +119,41 @@ def open_public_url(
             current = validate_public_url(urllib.parse.urljoin(current, location))
 
     raise UnsafeURLError(f"Too many redirects (maximum {max_redirects})")
+
+
+def read_response_bounded(response: PublicURLResponse, limit_bytes: int) -> bytes:
+    """Read a response body, optionally capped at ``limit_bytes`` (0 = unlimited)."""
+    if limit_bytes < 0:
+        raise ValueError("limit_bytes must be >= 0")
+
+    content_length = response.headers.get("Content-Length")
+    if limit_bytes > 0 and content_length:
+        try:
+            declared = int(content_length)
+        except ValueError:
+            declared = -1
+        if declared > limit_bytes:
+            raise FetchSizeError(
+                f"Remote response Content-Length ({declared} bytes) exceeds "
+                f"limit of {limit_bytes} bytes"
+            )
+
+    if limit_bytes == 0:
+        return response.read()
+
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = response.read(_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit_bytes:
+            raise FetchSizeError(
+                f"Remote response exceeds size limit of {limit_bytes} bytes"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def response_charset(headers: Message) -> str:

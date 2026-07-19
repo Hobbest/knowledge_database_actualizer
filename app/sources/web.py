@@ -14,7 +14,13 @@ from app.sources.base import (
     SourceSegment,
 )
 from app.sources.text import segments_from_markdown
-from app.url_security import UnsafeURLError, open_public_url, response_charset
+from app.url_security import (
+    FetchSizeError,
+    UnsafeURLError,
+    open_public_url,
+    read_response_bounded,
+    response_charset,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +39,9 @@ def fetch_html(url: str) -> str:
         headers={"User-Agent": USER_AGENT},
     ) as response:
         charset = response_charset(response.headers)
-        return response.read().decode(charset, errors="replace")
+        limit = 0 if settings.max_fetch_mb <= 0 else settings.max_fetch_mb * 1024 * 1024
+        body = read_response_bounded(response, limit)
+        return body.decode(charset, errors="replace")
 
 
 class WebArticleLoader(SourceLoader):
@@ -53,7 +61,7 @@ class WebArticleLoader(SourceLoader):
         url = url.strip()
         try:
             html = fetch_html(url)
-        except (urllib.error.URLError, TimeoutError, OSError, UnsafeURLError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, UnsafeURLError, FetchSizeError) as exc:
             raise ValueError(f"Could not fetch web page {url}: {exc}") from exc
 
         title, markdown = self._extract_article(html, url)

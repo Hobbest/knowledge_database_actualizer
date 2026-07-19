@@ -75,9 +75,20 @@ def call_with_retry(
             time.sleep(delay)
 
 
+# Batch note drafts need headroom; single notes are smaller.
+_DEFAULT_MAX_OUTPUT_TOKENS = 4096
+_JSON_MAX_OUTPUT_TOKENS = 8192
+
+
 class LLMProvider(ABC):
     @abstractmethod
-    def complete(self, prompt: str, *, system: str | None = None) -> str:
+    def complete(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        json_mode: bool = False,
+    ) -> str:
         raise NotImplementedError
 
 
@@ -88,17 +99,28 @@ class OpenAIProvider(LLMProvider):
         self.client = OpenAI(api_key=api_key)
         self.model = model
 
-    def complete(self, prompt: str, *, system: str | None = None) -> str:
+    def complete(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        json_mode: bool = False,
+    ) -> str:
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=0.3,
-        )
+        kwargs: dict = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.3,
+            "max_tokens": _JSON_MAX_OUTPUT_TOKENS if json_mode else _DEFAULT_MAX_OUTPUT_TOKENS,
+        }
+        if json_mode:
+            # OpenAI requires a top-level JSON object when this is set.
+            kwargs["response_format"] = {"type": "json_object"}
+        response = self.client.chat.completions.create(**kwargs)
         return response.choices[0].message.content or ""
 
 
@@ -109,10 +131,16 @@ class AnthropicProvider(LLMProvider):
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model
 
-    def complete(self, prompt: str, *, system: str | None = None) -> str:
+    def complete(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        json_mode: bool = False,
+    ) -> str:
         response = self.client.messages.create(
             model=self.model,
-            max_tokens=2048,
+            max_tokens=_JSON_MAX_OUTPUT_TOKENS if json_mode else _DEFAULT_MAX_OUTPUT_TOKENS,
             system=system or "You are a helpful assistant for knowledge management.",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
@@ -131,13 +159,26 @@ class GeminiProvider(LLMProvider):
         self.client = genai.Client(api_key=api_key)
         self.model = model
 
-    def complete(self, prompt: str, *, system: str | None = None) -> str:
+    def complete(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        json_mode: bool = False,
+    ) -> str:
         from google.genai import types
 
-        config = types.GenerateContentConfig(
-            system_instruction=system or "You are a helpful assistant for knowledge management.",
-            temperature=0.3,
-        )
+        config_kwargs: dict = {
+            "system_instruction": system
+            or "You are a helpful assistant for knowledge management.",
+            "temperature": 0.3,
+            "max_output_tokens": (
+                _JSON_MAX_OUTPUT_TOKENS if json_mode else _DEFAULT_MAX_OUTPUT_TOKENS
+            ),
+        }
+        if json_mode:
+            config_kwargs["response_mime_type"] = "application/json"
+        config = types.GenerateContentConfig(**config_kwargs)
         response = self.client.models.generate_content(
             model=self.model,
             contents=prompt,
@@ -157,16 +198,25 @@ class OllamaProvider(LLMProvider):
         self.model = model
         self.base_url = base_url
 
-    def complete(self, prompt: str, *, system: str | None = None) -> str:
+    def complete(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        json_mode: bool = False,
+    ) -> str:
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=0.3,
-        )
+        kwargs: dict = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.3,
+        }
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        response = self.client.chat.completions.create(**kwargs)
         return response.choices[0].message.content or ""
 
 

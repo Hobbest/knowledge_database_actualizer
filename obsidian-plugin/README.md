@@ -25,6 +25,7 @@ Thin client for the Knowledge Database Actualizer API. Keeps the Python server a
 | Index vault | Runs `/api/vault/index` for this vault |
 | Recover saved notes | Loads the latest checkpoint without re-analyzing |
 | Continue interrupted run | Resumes drafting with `resume=true` (same source as last analyze) |
+| Cancel analysis | Aborts the in-flight analyze stream (same as the sidebar Cancel button) |
 | Open Actualizer sidebar | Shows verdict, overlaps, and proposed notes |
 
 ## Sidebar workflow
@@ -32,7 +33,9 @@ Thin client for the Knowledge Database Actualizer API. Keeps the Python server a
 The sidebar mirrors the web UI essentials:
 
 - **Recover / Continue** when a checkpoint exists (rate limits, crashes, long PDF runs)
+- **Cancel analysis** while a run is in progress (disconnects the stream so the server stops early)
 - **Overlapping vault notes** with similarity, heading, and excerpt
+- **Paginated proposed notes** (5 / 10 / 25 / 50 / All) so large PDF runs stay usable in the sidebar
 - **Editable vault path and note content** before write
 - **Append vs new file** when a topic matches an existing note
 - **Exact merged-note preview** via `POST /api/suggestions/preview`

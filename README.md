@@ -70,7 +70,7 @@ download). CI runs the hermetic `tests/` suite and the client contract tests.
 2. Paste a YouTube or article URL, or upload a file (`.txt`, `.md`, `.pdf`, `.epub`, `.docx` — any non-YouTube `http(s)` URL is treated as a web article; the main text is extracted with [trafilatura](https://trafilatura.readthedocs.io/), skipping navigation, ads, and comments)
 3. Review the verdict, overlapping notes, and novel snippets
 4. Edit the proposed atomic notes (one concept per note, with source location)
-5. Select notes and click **Write selected to vault**
+5. Select notes and click **Write selected to vault** (known / partial topics and MOCs start deselected — select them to write or append)
    (existing files require confirmation; a `.bak` backup is kept on overwrite)
 
 ### Crash / rate-limit recovery
@@ -127,11 +127,14 @@ See `.env.example` for:
 - `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL` — similarity search (`local` uses sentence-transformers; `gemini` uses Google embedding models)
 - `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL` — optional note drafting (`openai`, `anthropic`, `gemini`, or `ollama` / `local`)
 - `OLLAMA_BASE_URL` — when using `LLM_PROVIDER=ollama` (default `http://127.0.0.1:11434`)
-- `API_TOKEN` — optional; when set, `/api/*` requires `Authorization: Bearer …` or `X-API-Token`
+- `API_TOKEN` — optional on localhost; **required** when `BIND_HOST` is non-loopback (Docker sets `0.0.0.0`)
+- `ALLOWED_VAULT_ROOTS` — comma-separated roots; when empty and `VAULT_PATH` is set, only that vault is allowed
+- `BIND_HOST` — uvicorn bind address (default `127.0.0.1`)
+- `MAX_UPLOAD_MB` — reject oversized uploads before buffering (default `50`; `0` = unlimited)
+- `MAX_FETCH_MB` — cap outbound web/HTML fetch bodies (default `10`; `0` = unlimited)
 - `NOTE_OUTPUT_FOLDER`, `NOTE_OUTPUT_LAYOUT`, `NOTE_OUTPUT_PATTERN` — where new atomic notes are written (see [Vault workflow](#vault-workflow-phase-d))
 - `VAULT_WATCH_ENABLED`, `VAULT_WATCH_DEBOUNCE_SECONDS` — automatic re-index on vault saves
 - `ANALYZE_IN_PLACE_ENABLED` — append to the analyzed note when overlap targets it
-- `MAX_UPLOAD_MB` — reject oversized uploads before buffering (default `50`; `0` = unlimited)
 - `YOUTUBE_TRANSCRIPT_LANGUAGES` — BCP-47 codes tried in order for YouTube transcripts (default `en,en-US,en-GB`); falls back to any available language when none match
 
 **Important:** Gemini chat models (e.g. `gemini-2.0-flash`) belong in `LLM_MODEL`, not `EMBEDDING_MODEL`. For Gemini embeddings use `EMBEDDING_PROVIDER=gemini` and `EMBEDDING_MODEL=gemini-embedding-001`.
@@ -141,11 +144,14 @@ See `.env.example` for:
 For anything beyond local development:
 
 - Do **not** use `--reload`; run a single worker process behind localhost or a reverse proxy.
-- Set `API_TOKEN`, a sensible `MAX_UPLOAD_MB`, and expand `ALLOWED_HOSTS` only when serving beyond loopback.
-- Mount persistent `DATA_DIR` and read-only `VAULT_PATH` volumes when containerizing.
+- Set a strong `API_TOKEN`. Non-loopback binds (`BIND_HOST=0.0.0.0`) refuse to start without one.
+- Set `ALLOWED_VAULT_ROOTS` (or rely on `VAULT_PATH` locking) so clients cannot point the API at arbitrary host directories.
+- Set a sensible `MAX_UPLOAD_MB` / `MAX_FETCH_MB`, and expand `ALLOWED_HOSTS` only when serving beyond loopback.
+- Mount persistent `DATA_DIR` and a **read-write** vault volume when you want Apply / write-to-vault to work (compose defaults to RW).
 
 ```bash
-# Docker
+# Docker (requires API_TOKEN in the environment)
+export API_TOKEN="$(openssl rand -hex 32)"
 docker compose up --build
 
 # systemd (example unit in deploy/knowledge-database-actualizer.service)
@@ -194,14 +200,18 @@ Leave `ALLOWED_HOSTS` empty to disable the Host check.
 
 ### LLM spend caps
 
-Each note may use one LLM call, or several notes may share one call when
-`LLM_DRAFT_BATCH_SIZE` > 1 (default `5`). Topic planning may add one more.
+Several notes share one LLM call when `LLM_DRAFT_BATCH_SIZE` > 1 (default `3`).
+Topic planning may add one more. If a batch call fails or omits a note, that note
+uses an **extractive** summary — it does **not** retry with a separate per-note
+LLM call (which previously doubled spend after parse failures). Set
+`LLM_DRAFT_BATCH_SIZE=1` for one call per note.
+
 Cap cost with:
 
 - `LLM_MAX_CALLS_PER_RUN` (default `50`) — hard limit on `complete()` calls per analyze
 - `LLM_MAX_INPUT_CHARS_PER_RUN` (default `400000`) — rough input-size budget (≈ tokens × 4)
 
-When a cap is hit, remaining notes fall back to extractive summaries and a warning is shown. Set either to `0` for unlimited.
+When a cap is hit, remaining notes fall back to extractive summaries and a warning is shown. Set either to `0` for unlimited (easy to overspend).
 
 ### Getting more notes from large PDFs
 
@@ -337,10 +347,11 @@ indexes when you work with more than one vault.
 When `LLM_DRAFT_BATCH_SIZE` is greater than `1`, the note drafter sends several
 topics in a **single LLM call** and expects a JSON array of note bodies back.
 This cuts round-trips on long sources while keeping the same per-note structure
-(frontmatter, Related notes, Source section).
+(frontmatter, Related notes, Source section). Failed or incomplete batches fall
+back to extractive text for the missing notes only — not to N extra LLM calls.
 
 ```bash
-LLM_DRAFT_BATCH_SIZE=3   # draft up to 3 topics per call (default: 5)
+LLM_DRAFT_BATCH_SIZE=3   # draft up to 3 topics per call (default: 3)
 ```
 
 Set to `1` for the original one-topic-per-call behavior. Requires an enabled

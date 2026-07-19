@@ -33,8 +33,12 @@ class EnvSection:
 # Ordered layout for .env.example (every Settings field must appear exactly once).
 ENV_SECTIONS: tuple[EnvSection, ...] = (
     EnvSection(
-        header=("# Path to your Obsidian vault (markdown files)",),
-        fields=("vault_path",),
+        header=(
+            "# Path to your Obsidian vault (markdown files).",
+            "# When VAULT_PATH is set, API requests may only use that exact path unless",
+            "# ALLOWED_VAULT_ROOTS lists parent directories (comma-separated) for multi-vault UI.",
+        ),
+        fields=("vault_path", "allowed_vault_roots"),
     ),
     EnvSection(
         header=("# Local data directory for Chroma and app state",),
@@ -106,8 +110,11 @@ ENV_SECTIONS: tuple[EnvSection, ...] = (
         fields=("segment_target_chars",),
     ),
     EnvSection(
-        header=("# Reject uploads larger than this many megabytes (0 = unlimited).",),
-        fields=("max_upload_mb",),
+        header=(
+            "# Reject uploads larger than this many megabytes (0 = unlimited).",
+            "# Cap outbound web/HTML fetch bodies separately (0 = unlimited).",
+        ),
+        fields=("max_upload_mb", "max_fetch_mb"),
     ),
     EnvSection(
         header=(
@@ -185,7 +192,8 @@ ENV_SECTIONS: tuple[EnvSection, ...] = (
     EnvSection(
         header=(
             "# Quality & cost (Phase E)",
-            "# LLM_DRAFT_BATCH_SIZE — draft N topics per LLM call (1 = one note per call)",
+            "# LLM_DRAFT_BATCH_SIZE — draft N topics per LLM call (1 = one note per call;",
+            "#   >1: failed/missing batch items use extractive fallback, not per-note LLM)",
             "# MULTI_VAULT_INDEX — separate Chroma collections per vault path",
             "# APPEND_UNDER_OVERLAP_HEADING — insert append content under matched section",
         ),
@@ -225,11 +233,18 @@ ENV_SECTIONS: tuple[EnvSection, ...] = (
     ),
     EnvSection(
         header=(
-            "# Optional shared secret for non-localhost deploys. When set, all /api/*",
-            "# requests need Authorization: Bearer <token> or X-API-Token: <token>.",
+            "# Optional shared secret. Required when BIND_HOST is non-loopback (e.g. 0.0.0.0).",
+            "# When set, all /api/* requests need Authorization: Bearer <token> or X-API-Token.",
             "# The SPA shell (/) stays public; the UI prompts for the token on 401.",
         ),
         fields=("api_token",),
+    ),
+    EnvSection(
+        header=(
+            "# Uvicorn bind address. Non-loopback values (0.0.0.0, LAN IPs) require API_TOKEN.",
+            "# Local defaults stay on 127.0.0.1; Docker sets BIND_HOST=0.0.0.0.",
+        ),
+        fields=("bind_host",),
     ),
     EnvSection(
         header=(

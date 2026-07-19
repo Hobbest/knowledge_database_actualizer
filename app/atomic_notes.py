@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import re
 from collections.abc import Callable
@@ -8,11 +7,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from app.config import settings
+from app.json_extract import extract_json_array
 from app.llm import call_with_retry, get_llm_provider, is_rate_limit_error
 from app.novelty import NoveltyResult
 from app.prompts import ARCHITECT_SYSTEM_PROMPT, topic_planning_prompt
 from app.sources.base import LoadedSource, SourceLocation, SourceSegment, merge_locations
 from app.text_limits import TEXT_LIMITS
+from app.summarize import compose_title
 from app.text_utils import (
     combine_segment_text,
     extract_topic_summary,
@@ -20,6 +21,24 @@ from app.text_utils import (
     truncate_with_ellipsis,
 )
 from app.vectorstore import VectorStore
+
+# Re-export for callers that imported the private helper from this module.
+_extract_json_array = extract_json_array
+
+
+def _title_for_split_part(base_title: str, body: str, part: int) -> str:
+    """Title a structural chunk; re-derive from body text after part 1."""
+    if part <= 1:
+        return base_title
+    derived = title_from_text(body)
+    composed = compose_title(derived)
+    base = compose_title(base_title)
+    if not composed or composed == "Untitled concept":
+        return f"{base_title} ({part})"
+    if composed.casefold() == base.casefold():
+        return f"{base_title} ({part})"
+    # Keep a part marker so paths stay unique when titles collide.
+    return f"{composed} ({part})"
 
 if TYPE_CHECKING:
     from app.llm_budget import LLMBudget
@@ -247,7 +266,8 @@ def _topics_from_paragraphs(
         if not chunk:
             return
         body = "\n\n".join(chunk).strip()
-        title = base_title if part == 1 and not topics else f"{base_title} ({part})"
+        # Part 1 keeps the section heading; later parts re-title from chunk text.
+        title = _title_for_split_part(base_title, body, part)
         topics.append(_atomic_topic(title, segment, body))
         part += 1
         chunk = []
@@ -280,7 +300,7 @@ def _topics_from_sentence_groups(
         if not group:
             return
         body = " ".join(group).strip()
-        title = base_title if part == 1 and not topics else f"{base_title} ({part})"
+        title = _title_for_split_part(base_title, body, part)
         topics.append(_atomic_topic(title, segment, body))
         part += 1
         group = []
@@ -403,18 +423,3 @@ def _llm_plan_topics(
         return None
 
 
-def _extract_json_array(raw: str) -> list[dict]:
-    text = raw.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-
-    start = text.find("[")
-    end = text.rfind("]")
-    if start == -1 or end == -1:
-        return []
-
-    parsed = json.loads(text[start : end + 1])
-    if not isinstance(parsed, list):
-        return []
-    return [item for item in parsed if isinstance(item, dict)]

@@ -1,7 +1,7 @@
 {
   "id": "knowledge-database-actualizer",
   "name": "Knowledge Database Actualizer",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "minAppVersion": "1.4.0",
   "description": "Analyze YouTube, web articles, PDFs, EPUB, DOCX, and vault notes from the sidebar; review and write atomic notes back into Obsidian.",
   "author": "Knowledge Database Actualizer",
