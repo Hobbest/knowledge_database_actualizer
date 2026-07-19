@@ -25,5 +25,27 @@ def adjusted_similarity(
     query_tags: list[str] | None,
     match_tags: list[str] | None,
 ) -> float:
-    """Apply tag overlap boost, capped at 1.0."""
+    """Apply tag overlap boost, capped at 1.0.
+
+    Used for *ranking* related notes and overlap targets, where a shared topic
+    is a useful tie-breaker. For the novel/known decision use
+    :func:`classification_similarity` instead.
+    """
     return min(1.0, base_similarity + tag_overlap_boost(query_tags, match_tags))
+
+
+def classification_similarity(
+    base_similarity: float,
+    query_tags: list[str] | None,
+    match_tags: list[str] | None,
+) -> float:
+    """Similarity used for the novel/known verdict decision.
+
+    The tag-overlap boost is only applied once the raw cosine is already in the
+    gray zone (``>= NOVEL_THRESHOLD``). Below that the content is genuinely new
+    relative to the match, so shared tags -- which signal *topic*, not
+    *redundancy* -- must not push it toward "known" and hide real novelty.
+    """
+    if base_similarity < settings.novel_threshold:
+        return base_similarity
+    return adjusted_similarity(base_similarity, query_tags, match_tags)

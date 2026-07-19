@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -191,6 +192,138 @@ def _related_links(overlapping_notes: list[OverlappingNote]) -> list[str]:
         if link and link not in links:
             links.append(link)
     return links
+
+
+def _topic_related_links(
+    vector_store: VectorStore | None,
+    topic: AtomicTopic,
+    *,
+    source_tags: list[str] | None,
+    fallback: list[str],
+) -> list[str]:
+    """Wikilinks to the vault notes most related to *this* topic's concept.
+
+    Each note links to concepts relevant to its own content instead of sharing
+    one source-wide list. Matches below ``NOVEL_THRESHOLD`` are dropped so
+    unrelated notes are not linked; a truly novel note therefore links nothing
+    rather than the source's global overlaps. Falls back to the source-level
+    related links only when the vault cannot be queried (no index / no text).
+    """
+    if vector_store is None or vector_store.chunk_count() == 0:
+        return list(fallback)
+    text = combine_segment_text(topic.segments).strip()
+    if not text:
+        return list(fallback)
+    try:
+        matches = vector_store.query_similar(
+            text,
+            top_k=TEXT_LIMITS.related_link_count,
+            query_tags=source_tags,
+        )
+    except Exception:  # noqa: BLE001 - related links are best-effort
+        return list(fallback)
+
+    links: list[str] = []
+    for match in matches:
+        if match.content_similarity < settings.novel_threshold:
+            continue
+        if not match.note_path:
+            continue
+        link = format_wikilink(match.note_path)
+        if link and link not in links:
+            links.append(link)
+    return links
+
+
+_RELATED_SECTION_RE = re.compile(
+    r"(?P<head>#{1,6}[ \t]*Related notes[ \t]*\n+)(?P<body>(?:[ \t]*-[ \t].*\n?)+)",
+    re.IGNORECASE,
+)
+
+
+def _strip_related_notes_section(body: str) -> str:
+    """Remove any 'Related notes' heading + list so the code can author its own."""
+    return re.sub(
+        r"\n#{1,6}[ \t]*Related notes\b[\s\S]*?(?=\n#{1,6}\s|\Z)",
+        "\n",
+        body.strip(),
+        flags=re.IGNORECASE,
+    ).strip()
+
+
+def _inject_related_links(content: str, extra_links: list[str]) -> str:
+    """Merge ``extra_links`` into an existing '## Related notes' bullet list."""
+    if not extra_links:
+        return content
+    match = _RELATED_SECTION_RE.search(content)
+    if not match:
+        return content
+    existing = [
+        line.strip()[2:].strip()
+        for line in match.group("body").splitlines()
+        if line.strip().startswith("- ")
+    ]
+    existing = [link for link in existing if link and link.casefold() != "none"]
+    merged = list(dict.fromkeys([*existing, *extra_links]))
+    new_block = "".join(f"- {link}\n" for link in merged)
+    return content[: match.start("body")] + new_block + content[match.end("body") :]
+
+
+def _normalize_vector(vector: list[float]) -> list[float]:
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm == 0.0:
+        return vector
+    return [value / norm for value in vector]
+
+
+def _cosine(left: list[float], right: list[float]) -> float:
+    return sum(a * b for a, b in zip(left, right, strict=False))
+
+
+def _link_sibling_notes(
+    pairs: list[tuple[NoteSuggestion, str]],
+    vector_store: VectorStore | None,
+) -> None:
+    """Cross-link notes from this source to their most similar siblings.
+
+    Builds a small local graph among the new notes (Zettelkasten style) on top
+    of the source-level MOC. Best-effort: any embedding failure (including a
+    rate limit) leaves the notes untouched. Topic texts reuse the cached query
+    embeddings from ``_topic_related_links`` so this rarely costs extra calls.
+    """
+    if not settings.link_sibling_notes or vector_store is None:
+        return
+    notes = [(item, text) for item, text in pairs if item.note_path and text.strip()]
+    if len(notes) < 2:
+        return
+    try:
+        vectors = vector_store.embedding_service.embed_texts(
+            [text for _item, text in notes],
+            task_type="RETRIEVAL_QUERY",
+        )
+    except Exception:  # noqa: BLE001 - sibling links are best-effort
+        return
+    if len(vectors) != len(notes):
+        return
+
+    normalized = [_normalize_vector(vector) for vector in vectors]
+    count = max(1, settings.sibling_link_count)
+    for i, (suggestion, _text) in enumerate(notes):
+        scored: list[tuple[float, NoteSuggestion]] = []
+        for j, (other, _other_text) in enumerate(notes):
+            if i == j or not other.note_path:
+                continue
+            similarity = _cosine(normalized[i], normalized[j])
+            if similarity >= settings.novel_threshold:
+                scored.append((similarity, other))
+        scored.sort(key=lambda entry: entry[0], reverse=True)
+        links: list[str] = []
+        for _similarity, other in scored[:count]:
+            link = format_wikilink(other.note_path)
+            if link and link not in links:
+                links.append(link)
+        if links:
+            suggestion.content = _inject_related_links(suggestion.content, links)
 
 
 def _infer_note_tags(overlapping_notes: list[OverlappingNote]) -> list[str]:
@@ -685,10 +818,20 @@ def _build_suggestion(
     location = topic_location(topic)
     title = compose_title(topic.title)
 
+    # Related links specific to this concept, so each note points at the vault
+    # notes relevant to *it* rather than to the source as a whole.
+    source_tags = list(source.tags) if source.tags else None
+    topic_links = _topic_related_links(
+        vector_store,
+        topic,
+        source_tags=source_tags,
+        fallback=related_links,
+    )
+
     body = pre_drafted_body
     if body is None and use_llm:
         # May raise (e.g. rate limit / budget); the caller decides how to recover.
-        body = _llm_draft_topic_body(source, topic, related_links, budget=budget)
+        body = _llm_draft_topic_body(source, topic, topic_links, budget=budget)
     body = body or _fallback_topic_body(topic)
     body = _strip_source_section(body)
 
@@ -705,9 +848,11 @@ def _build_suggestion(
         if media_section:
             body = body.rstrip() + "\n\n" + media_section
 
-    related_section = "\n".join(f"- {link}" for link in related_links) if related_links else "- none"
-    if "## Related notes" not in body:
-        body = body.rstrip() + f"\n\n## Related notes\n\n{related_section}\n"
+    # Author the Related notes section from per-topic links so it is accurate
+    # and never duplicated by a section the LLM may have emitted itself.
+    body = _strip_related_notes_section(body)
+    related_section = "\n".join(f"- {link}" for link in topic_links) if topic_links else "- none"
+    body = body.rstrip() + f"\n\n## Related notes\n\n{related_section}\n"
 
     body = body.rstrip() + "\n\n" + _source_section(source, location)
     note_tags = _infer_note_tags(overlapping_notes or [])
@@ -952,6 +1097,14 @@ def iter_note_suggestions(
                 continue
             pending.append((identity, topic))
 
+        # Draft novel topics first so a limited LLM budget (or an early rate
+        # limit) is spent where the tool adds the most value; known/partial
+        # topics degrade to extractive summaries instead of the novel ones.
+        # A stable sort preserves source order within each novelty group, and
+        # the final note ordering is untouched (the main loop below still
+        # iterates ``topics`` in source order).
+        pending.sort(key=lambda item: 0 if item[1].is_novel else 1)
+
         # Shrink batches as the char budget runs low so leftover capacity is used
         # instead of marking the run exhausted on the first oversized batch.
         cursor = 0
@@ -1167,8 +1320,14 @@ def iter_note_suggestions(
             )
 
         suggestions.append(suggestion)
+        if not suggestion.is_moc:
+            sibling_candidates.append((suggestion, combine_segment_text(topic.segments)))
         if checkpoint is not None:
             checkpoint.add(suggestion.to_dict())
+
+    # Cross-link the new notes to their most similar siblings (Zettelkasten
+    # style), in addition to the source-level MOC. Best-effort and additive.
+    _link_sibling_notes(sibling_candidates, vector_store)
 
     # Preserve any recovered notes that did not map to a re-planned topic (e.g.
     # if planning produced slightly different topics) so resuming never loses

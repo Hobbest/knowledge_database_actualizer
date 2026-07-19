@@ -103,6 +103,11 @@ class Settings(BaseSettings):
     threshold_calibration_samples: int = 200
     # Append Obsidian ^block-id refs to bullets/paragraphs on write.
     include_block_ids: bool = False
+    # Cross-link notes drafted from the same source to their most similar
+    # siblings (Zettelkasten-style local graph, in addition to the MOC index).
+    link_sibling_notes: bool = True
+    # Maximum sibling wikilinks added to each note when linking is enabled.
+    sibling_link_count: int = 3
 
     # When > 0, inline bounded excerpts from ![[embedded]] notes into embeddings.
     transclude_depth: int = 0

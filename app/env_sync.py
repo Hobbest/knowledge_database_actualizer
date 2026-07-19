@@ -210,6 +210,8 @@ ENV_SECTIONS: tuple[EnvSection, ...] = (
             "# Tag overlap boost for novelty when source/vault tags match",
             "# THRESHOLD_CALIBRATION_SAMPLES — chunk pairs sampled for threshold assistant",
             "# INCLUDE_BLOCK_IDS — append Obsidian ^block-id refs on write",
+            "# LINK_SIBLING_NOTES — cross-link notes from one source to similar siblings",
+            "# SIBLING_LINK_COUNT — max sibling wikilinks added per note",
         ),
         fields=(
             "rich_note_embeddings",
@@ -218,6 +220,8 @@ ENV_SECTIONS: tuple[EnvSection, ...] = (
             "tag_similarity_max_boost",
             "threshold_calibration_samples",
             "include_block_ids",
+            "link_sibling_notes",
+            "sibling_link_count",
         ),
     ),
     EnvSection(

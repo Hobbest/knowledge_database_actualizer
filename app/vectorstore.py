@@ -64,6 +64,18 @@ class SimilarChunk:
     similarity: float
     heading: str | None = None
     tags: list[str] = field(default_factory=list)
+    # Raw cosine before any tag-overlap boost. Ranking uses ``similarity`` (tag
+    # aware); the novel/known decision uses this so tags cannot mask novelty.
+    base_similarity: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.base_similarity is None:
+            self.base_similarity = self.similarity
+
+    @property
+    def content_similarity(self) -> float:
+        """Raw cosine similarity (never tag-boosted)."""
+        return self.similarity if self.base_similarity is None else self.base_similarity
 
 
 @dataclass
@@ -422,6 +434,7 @@ class VectorStore:
                         similarity=similarity,
                         heading=meta.get("heading") or None,
                         tags=match_tags,
+                        base_similarity=base_similarity,
                     )
                 )
             similar.sort(key=lambda item: item.similarity, reverse=True)

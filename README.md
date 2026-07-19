@@ -433,7 +433,10 @@ are reported on index — use a path-qualified link for those.
 ## Quality & intelligence (Phase 4)
 
 - **Richer embeddings:** with `RICH_NOTE_EMBEDDINGS=true` (default), indexed chunks include note title, aliases, and tags — not just body text.
-- **Tag-aware novelty:** when source and vault tags overlap, similarity gets a small boost so related notes are less likely to be marked "Novel".
+- **Tag-aware novelty:** when source and vault tags overlap, similarity gets a small boost so on-topic notes rank higher. The boost only nudges the **known** side of a *borderline* segment (raw cosine already `≥ NOVEL_THRESHOLD`); a segment below `NOVEL_THRESHOLD` stays novel regardless of shared tags, so tags can no longer mask genuinely new content.
+- **Per-note related links:** each drafted note links to the vault notes most similar to *that concept* (matches below `NOVEL_THRESHOLD` are dropped), instead of every note sharing one source-wide list. A truly novel note links nothing rather than loosely-related notes.
+- **Sibling links:** with `LINK_SIBLING_NOTES=true` (default), notes drafted from the same source cross-link to their most similar siblings (up to `SIBLING_LINK_COUNT`, default `3`) — a small local graph on top of the MOC index. Best-effort: any embedding hiccup leaves notes untouched.
+- **Novelty-first drafting:** when batch drafting (`LLM_DRAFT_BATCH_SIZE > 1`), novel topics are drafted before known/partial ones, so a limited LLM budget or an early rate limit is spent where the tool adds the most value. The final note order still follows the source.
 - **Threshold assistant:** use **Calibrate thresholds** in the web UI or `GET /api/vault/thresholds/calibrate` after indexing (available when the index has enough chunks).
 - **Block references:** set `INCLUDE_BLOCK_IDS=true` to append Obsidian `^block-id` suffixes to bullets and paragraphs when notes are written.
 

@@ -9,6 +9,7 @@ from app.config import settings
 from app.llm import is_rate_limit_error
 from app.relevance import filter_relevant_segments
 from app.segmentation import split_large_segments
+from app.similarity import classification_similarity
 from app.sources.base import LoadedSource, SourceSegment
 from app.text_limits import TEXT_LIMITS
 from app.vectorstore import SimilarChunk, VectorStore
@@ -61,9 +62,17 @@ class SourceSimilarityAnalysis:
     warnings: list[str] = field(default_factory=list)
 
 
-def _classify_chunk(similarity: float) -> tuple[bool, bool]:
-    is_novel = similarity < settings.novel_threshold
-    is_known = similarity >= settings.known_threshold
+def _classify_chunk(
+    base_similarity: float,
+    query_tags: list[str] | None = None,
+    match_tags: list[str] | None = None,
+) -> tuple[bool, bool]:
+    # Novelty is decided on the raw cosine so a shared tag cannot mask genuinely
+    # new content. The "known" side uses the gray-zone tag nudge, letting an
+    # on-topic match tip a borderline segment over KNOWN_THRESHOLD.
+    is_novel = base_similarity < settings.novel_threshold
+    effective = classification_similarity(base_similarity, query_tags, match_tags)
+    is_known = effective >= settings.known_threshold
     return is_novel, is_known
 
 
@@ -133,8 +142,13 @@ def analyze_novelty(
             best_similarity = 0.0
             matches = []
         else:
-            best_similarity = matches[0].similarity if matches else 0.0
-            is_novel, is_known = _classify_chunk(best_similarity)
+            top = matches[0] if matches else None
+            best_similarity = top.content_similarity if top else 0.0
+            is_novel, is_known = _classify_chunk(
+                best_similarity,
+                query_tags=source_tags,
+                match_tags=top.tags if top else None,
+            )
 
             for match in matches:
                 key = match.note_path
@@ -260,8 +274,13 @@ def analyze_source_similarity(
             best_similarity = 0.0
             is_novel, is_known = False, False
         else:
-            best_similarity = matches[0].similarity if matches else 0.0
-            is_novel, is_known = _classify_chunk(best_similarity)
+            top = matches[0] if matches else None
+            best_similarity = top.content_similarity if top else 0.0
+            is_novel, is_known = _classify_chunk(
+                best_similarity,
+                query_tags=source_tags,
+                match_tags=top.tags if top else None,
+            )
 
         if not is_unknown:
             novelty_scores.append(1.0 - best_similarity)

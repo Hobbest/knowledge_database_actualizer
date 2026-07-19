@@ -131,7 +131,10 @@ def score_segments(
             return results
 
         for segment, matches in zip(batch, matches_batch, strict=True):
-            best_similarity = matches[0].similarity if matches else 0.0
+            # Use the raw cosine (not the tag-boosted score) so a shared tag
+            # cannot flip a genuinely novel segment to "known" during planning.
+            top = matches[0] if matches else None
+            best_similarity = top.content_similarity if top else 0.0
             results.append(
                 SegmentNovelty(
                     segment=segment,
