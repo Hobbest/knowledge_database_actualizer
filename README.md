@@ -204,15 +204,20 @@ Leave `ALLOWED_HOSTS` empty to disable the Host check.
 ### LLM spend caps
 
 Several notes share one LLM call when `LLM_DRAFT_BATCH_SIZE` > 1 (default `3`).
-Topic planning may add one more. If a batch call fails or omits a note, that note
-uses an **extractive** summary — it does **not** retry with a separate per-note
-LLM call (which previously doubled spend after parse failures). Set
-`LLM_DRAFT_BATCH_SIZE=1` for one call per note.
+Topic planning may add a few more (see below). If a batch call fails or omits a
+note, that note uses an **extractive** summary — it does **not** retry with a
+separate per-note LLM call (which previously doubled spend after parse
+failures). Set `LLM_DRAFT_BATCH_SIZE=1` for one call per note.
 
 Cap cost with:
 
 - `LLM_MAX_CALLS_PER_RUN` (default `50`) — hard limit on `complete()` calls per analyze
 - `LLM_MAX_INPUT_CHARS_PER_RUN` (default `400000`) — rough input-size budget (≈ tokens × 4)
+- `LLM_MAX_PLANNING_CALLS` (default `6`) — max topic-planning calls per run. Large
+  sources are planned in **windows** (map-reduce) so the planner sees the whole
+  source, not just a prefix; this bounds how many planning calls that can take.
+  Set to `1` for a single planning window (windows beyond the cap are planned
+  structurally), or `0` for unlimited (still bounded by the caps above).
 
 When a cap is hit, remaining notes fall back to extractive summaries and a warning is shown. Set either to `0` for unlimited (easy to overspend).
 
@@ -230,6 +235,13 @@ number of notes is driven mainly by:
 
 If a very large PDF still yields too few notes, first lower `SEGMENT_TARGET_CHARS`,
 then raise `MAX_NOTES_PER_SOURCE` if you hit the cap.
+
+When an LLM is configured, topic planning runs **map-reduce** over large sources:
+the source is split into planning windows, each window is planned in its own LLM
+call (bounded by `LLM_MAX_PLANNING_CALLS`), and the results are reconciled with
+structural planning so **every segment becomes a note even if the LLM omits it**
+or a window is left unplanned. Windows beyond the call cap fall back to
+structural planning, so coverage never depends on the LLM.
 
 ### Skipping boilerplate
 

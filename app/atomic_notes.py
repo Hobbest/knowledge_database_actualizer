@@ -164,17 +164,11 @@ def plan_atomic_topics(
     novelty_by_index = {item.segment.index: item for item in segment_scores}
     structural_topics = _structural_plan_topics(all_segments)
 
-    llm_topics = _llm_plan_topics(
-        source,
-        all_segments,
-        novelty,
-        structural_count=len(structural_topics),
-        budget=budget,
-    )
-    if llm_topics and len(llm_topics) >= _minimum_topic_count(len(all_segments), len(structural_topics)):
-        topics = llm_topics
-    else:
-        topics = structural_topics
+    # Plan across the whole source in bounded windows (map), then reconcile with
+    # structural coverage (reduce): keep the LLM's concept grouping while making
+    # sure no segment is ever dropped from note generation.
+    llm_topics = _llm_plan_topics_windowed(source, all_segments, novelty, budget=budget)
+    topics = _reconcile_topics(llm_topics, structural_topics, all_segments)
 
     for topic in topics:
         scores = [
@@ -453,5 +447,113 @@ def _llm_plan_topics(
     except Exception as exc:  # noqa: BLE001 - structural planning is the fallback
         logger.warning("LLM topic planning failed: %s", exc)
         return None
+
+
+def _plan_windows(segments: list[SourceSegment]) -> list[list[SourceSegment]]:
+    """Partition segments into contiguous windows that each fit one planning call.
+
+    The single-call planner could only ever see a prefix of a large source (the
+    outline was truncated to the char budget). Windowing lets the planner cover
+    the whole source across multiple bounded calls instead.
+    """
+    max_segments = max(1, TEXT_LIMITS.llm_planning_max_segments)
+    segment_chars = TEXT_LIMITS.llm_planning_segment_chars
+    total_budget = TEXT_LIMITS.llm_planning_total_chars_budget
+
+    windows: list[list[SourceSegment]] = []
+    current: list[SourceSegment] = []
+    current_chars = 0
+    for segment in segments:
+        seg_chars = min(len(segment.text), segment_chars)
+        if current and (
+            len(current) >= max_segments or current_chars + seg_chars > total_budget
+        ):
+            windows.append(current)
+            current = []
+            current_chars = 0
+        current.append(segment)
+        current_chars += seg_chars
+    if current:
+        windows.append(current)
+    return windows
+
+
+def _llm_plan_topics_windowed(
+    source: LoadedSource,
+    segments: list[SourceSegment],
+    novelty: NoveltyResult,
+    *,
+    budget: LLMBudget | None = None,
+) -> list[AtomicTopic]:
+    """Plan topics across the whole source in bounded LLM windows (the map step).
+
+    Every segment is covered by some window, subject to a per-run planning-call
+    cap (``LLM_MAX_PLANNING_CALLS``) so planning cannot starve the drafting
+    budget. Windows that are not planned (cap reached, budget too low, or the LLM
+    failed) contribute nothing here and are filled structurally by the caller.
+    """
+    provider = get_llm_provider()
+    if not provider:
+        return []
+
+    windows = _plan_windows(segments)
+    max_calls = settings.llm_max_planning_calls
+    topics: list[AtomicTopic] = []
+    calls = 0
+    for window in windows:
+        if max_calls and calls >= max_calls:
+            logger.info(
+                "Planning call cap (%s) reached; remaining window(s) use structural planning",
+                max_calls,
+            )
+            break
+        if budget is not None and budget.exhausted:
+            break
+
+        before = budget.calls if budget is not None else -1
+        window_topics = _llm_plan_topics(source, window, novelty, budget=budget)
+        made_call = budget is None or budget.calls > before
+        if made_call:
+            calls += 1
+        if window_topics:
+            topics.extend(window_topics)
+        elif not made_call:
+            # The planning prompt no longer fits the remaining budget; it never
+            # will (budget only shrinks), so stop trying further windows.
+            break
+    return topics
+
+
+def _order_topics(topics: list[AtomicTopic]) -> list[AtomicTopic]:
+    """Order topics by their earliest source segment to preserve reading order."""
+    return sorted(topics, key=lambda topic: min((s.index for s in topic.segments), default=0))
+
+
+def _reconcile_topics(
+    llm_topics: list[AtomicTopic],
+    structural_topics: list[AtomicTopic],
+    all_segments: list[SourceSegment],
+) -> list[AtomicTopic]:
+    """Combine LLM concept grouping with structural coverage (the reduce step).
+
+    Segments the LLM never placed in a topic -- dropped from its response, or in
+    a window that was never planned -- are filled from structural planning, so
+    content is never lost. Falls back to pure structural planning when there is
+    no LLM plan or it is degenerately under-segmented (few oversized topics).
+    """
+    if not llm_topics:
+        return structural_topics
+
+    covered = {segment.index for topic in llm_topics for segment in topic.segments}
+    uncovered = [segment for segment in all_segments if segment.index not in covered]
+    fill = _structural_plan_topics(uncovered) if uncovered else []
+    combined = _order_topics(llm_topics + fill)
+
+    min_topics = _minimum_topic_count(len(all_segments), len(structural_topics))
+    if len(combined) < min_topics:
+        # The LLM merged the source into too few large notes; structural planning
+        # keeps notes atomic instead.
+        return structural_topics
+    return combined
 
 

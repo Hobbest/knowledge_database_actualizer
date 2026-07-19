@@ -124,6 +124,10 @@ class Settings(BaseSettings):
     # When > 1, failed/missing batch items use extractive fallback — never a
     # second per-note LLM call (avoids double-spend after parse failures).
     llm_draft_batch_size: int = 3
+    # Max LLM topic-planning calls per run (map-reduce over large sources; 0 =
+    # unlimited, still bounded by the per-run LLM caps). 1 keeps the old
+    # single-window behavior; windows beyond the cap are planned structurally.
+    llm_max_planning_calls: int = 6
     # Keep separate Chroma collections per vault path (switch vaults without rebuild).
     multi_vault_index_enabled: bool = False
     # When appending to an overlapping note, insert under the matched chunk heading.

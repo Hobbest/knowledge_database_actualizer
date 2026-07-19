@@ -1064,6 +1064,8 @@ def iter_note_suggestions(
         )
 
     suggestions: list[NoteSuggestion] = []
+    # Freshly drafted (suggestion, topic text) pairs used to cross-link siblings.
+    sibling_candidates: list[tuple[NoteSuggestion, str]] = []
     # Reserve every recovered note's path so freshly drafted notes never collide
     # with (and overwrite) a note we are about to preserve.
     used_paths: set[str] = {
