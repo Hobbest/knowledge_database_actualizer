@@ -30,6 +30,8 @@ ATOMIC_NOTE_RULES = (
     "Use markdown headings",
     "Include a short definition and 2-5 bullet points",
     "Add a 'Related notes' section with [[wikilinks]] when useful",
+    "When vault context is provided, prefer those [[wikilinks]] for cross-references "
+    "and do not invent vault note paths",
     "Do not include YAML frontmatter",
     "Do not include a Source section (it will be appended automatically)",
     "Provide examples when the excerpt supports them",
@@ -103,13 +105,21 @@ def batch_note_draft_prompt(
     topics: list[dict],
     related_links: list[str],
     max_note_lines: int,
+    vault_context: str = "",
 ) -> str:
     links_text = ", ".join(related_links) if related_links else "none"
     topics_json = json.dumps(topics, indent=2)
+    context_block = ""
+    if vault_context.strip():
+        context_block = (
+            "\nExisting vault context (use for accurate [[wikilinks]]; do not invent paths):\n"
+            f"{wrap_untrusted('vault excerpts', vault_context.strip())}\n"
+        )
     return (
         "Write atomic Obsidian notes for each concept below.\n\n"
         f"Source: {_sanitize_untrusted(source.title)} ({source.source_type})\n"
-        f"Related notes: {links_text}\n\n"
+        f"Related notes: {links_text}\n"
+        f"{context_block}\n"
         f"{wrap_untrusted('concepts and excerpts', topics_json)}\n\n"
         "Output format — return ONLY note blocks in exactly this shape, with no "
         "JSON, no code fences, and no text before or after:\n\n"
@@ -139,14 +149,22 @@ def note_draft_prompt(
     excerpt: str,
     related_links: list[str],
     max_note_lines: int,
+    vault_context: str = "",
 ) -> str:
     links_text = ", ".join(related_links) if related_links else "none"
     safe_title = _sanitize_untrusted(concept_title)
+    context_block = ""
+    if vault_context.strip():
+        context_block = (
+            "\nExisting vault context (use for accurate [[wikilinks]]; do not invent paths):\n"
+            f"{wrap_untrusted('vault excerpts', vault_context.strip())}\n"
+        )
     return (
         f"Write one atomic Obsidian note for the concept '{safe_title}'.\n\n"
         f"Source: {_sanitize_untrusted(source.title)} ({source.source_type})\n"
         f"Checkable location in source: {_sanitize_untrusted(location_display)}\n"
-        f"Related notes: {links_text}\n\n"
+        f"Related notes: {links_text}\n"
+        f"{context_block}\n"
         f"{wrap_untrusted('source excerpt', excerpt)}\n\n"
         "Requirements:\n"
         f"{_format_rules(ATOMIC_NOTE_RULES)}\n"

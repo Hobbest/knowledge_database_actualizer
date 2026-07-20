@@ -32,6 +32,11 @@ from app.json_extract import extract_json_array
 from app.llm import call_with_retry, complete_with_usage, get_llm_provider, is_rate_limit_error
 from app.llm_budget import LLMBudget, estimate_run_cost_hint
 from app.media import media_for_location, render_media_section
+from app.note_intelligence import (
+    annotate_note_intelligence,
+    format_vault_context,
+    retrieve_vault_context,
+)
 from app.note_output import (
     apply_note_template,
     default_note_path,
@@ -81,6 +86,10 @@ class NoteSuggestion:
     # True when any reliably scored segment looked novel vs the vault.
     # False (known/partial/unknown) → UI default-deselects; drafting still runs.
     is_novel: bool = True
+    quality_score: float | None = None
+    quality_flags: list[str] | None = None
+    duplicate_of: str | None = None
+    duplicate_similarity: float | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -95,6 +104,10 @@ class NoteSuggestion:
             "overlap_similarity": self.overlap_similarity,
             "is_moc": self.is_moc,
             "is_novel": self.is_novel,
+            "quality_score": self.quality_score,
+            "quality_flags": list(self.quality_flags or []),
+            "duplicate_of": self.duplicate_of,
+            "duplicate_similarity": self.duplicate_similarity,
         }
 
     @classmethod
@@ -113,6 +126,10 @@ class NoteSuggestion:
             # Missing key (older checkpoints) → treat as novel so we do not
             # surprise-deselect recovered drafts.
             is_novel=bool(data["is_novel"]) if "is_novel" in data else True,
+            quality_score=data.get("quality_score"),
+            quality_flags=list(data.get("quality_flags") or []) or None,
+            duplicate_of=data.get("duplicate_of"),
+            duplicate_similarity=data.get("duplicate_similarity"),
         )
 
 
@@ -468,12 +485,28 @@ def _source_section(source: LoadedSource, location: SourceLocation) -> str:
     )
 
 
+def _vault_context_for_topic(
+    vector_store: VectorStore | None,
+    topic: AtomicTopic,
+    *,
+    source_tags: list[str] | None,
+) -> str:
+    text = combine_segment_text(topic.segments).strip() or topic.summary or topic.title
+    chunks = retrieve_vault_context(
+        vector_store,
+        text,
+        query_tags=source_tags,
+    )
+    return format_vault_context(chunks)
+
+
 def _llm_draft_topic_body(
     source: LoadedSource,
     topic: AtomicTopic,
     related_links: list[str],
     *,
     budget: LLMBudget | None = None,
+    vault_context: str = "",
 ) -> str | None:
     provider = get_llm_provider()
     if not provider:
@@ -498,6 +531,7 @@ def _llm_draft_topic_body(
         excerpt=excerpt,
         related_links=related_links,
         max_note_lines=settings.max_note_lines,
+        vault_context=vault_context,
     )
     prompt_chars = len(prompt) + len(NOTE_WRITER_SYSTEM_PROMPT)
     if budget is not None and not budget.can_call(prompt_chars):
@@ -517,7 +551,12 @@ def _llm_draft_topic_body(
     return text
 
 
-def _batch_draft_payload(topics: list[AtomicTopic]) -> list[dict]:
+def _batch_draft_payload(
+    topics: list[AtomicTopic],
+    *,
+    vector_store: VectorStore | None = None,
+    source_tags: list[str] | None = None,
+) -> list[dict]:
     """Build the JSON payload for a batch draft prompt."""
     batch_excerpt_chars = min(700, TEXT_LIMITS.note_draft_excerpt_chars)
     payload: list[dict] = []
@@ -536,6 +575,13 @@ def _batch_draft_payload(topics: list[AtomicTopic]) -> list[dict]:
         }
         if topic.summary and topic.summary.strip():
             item["summary"] = topic.summary.strip()[:400]
+        vault_context = _vault_context_for_topic(
+            vector_store,
+            topic,
+            source_tags=source_tags,
+        )
+        if vault_context:
+            item["vault_context"] = vault_context
         payload.append(item)
     return payload
 
@@ -544,12 +590,19 @@ def _batch_draft_prompt_chars(
     source: LoadedSource,
     topics: list[AtomicTopic],
     related_links: list[str],
+    *,
+    vector_store: VectorStore | None = None,
+    source_tags: list[str] | None = None,
 ) -> int:
     """Estimate input chars for drafting ``topics`` in one batch call."""
     batch_max_lines = min(30, settings.max_note_lines)
     prompt = batch_note_draft_prompt(
         source=source,
-        topics=_batch_draft_payload(topics),
+        topics=_batch_draft_payload(
+            topics,
+            vector_store=vector_store,
+            source_tags=source_tags,
+        ),
         related_links=related_links,
         max_note_lines=batch_max_lines,
     )
@@ -563,6 +616,8 @@ def _largest_batch_that_fits(
     budget: LLMBudget,
     *,
     max_size: int,
+    vector_store: VectorStore | None = None,
+    source_tags: list[str] | None = None,
 ) -> int:
     """Return how many leading topics fit in the remaining input-char budget."""
     if not topics or max_size < 1:
@@ -571,7 +626,15 @@ def _largest_batch_that_fits(
         return 0
     take = min(max_size, len(topics))
     while take > 0:
-        if budget.can_call(_batch_draft_prompt_chars(source, topics[:take], related_links)):
+        if budget.can_call(
+            _batch_draft_prompt_chars(
+                source,
+                topics[:take],
+                related_links,
+                vector_store=vector_store,
+                source_tags=source_tags,
+            )
+        ):
             return take
         take -= 1
     return 0
@@ -617,6 +680,8 @@ def _llm_draft_topics_batch(
     related_links: list[str],
     *,
     budget: LLMBudget | None = None,
+    vector_store: VectorStore | None = None,
+    source_tags: list[str] | None = None,
 ) -> dict[str, str]:
     """Draft several topics in one LLM call; returns topic id -> body.
 
@@ -631,7 +696,11 @@ def _llm_draft_topics_batch(
 
     # Keep prompts/outputs small so replies are less likely to truncate.
     batch_max_lines = min(30, settings.max_note_lines)
-    payload = _batch_draft_payload(topics)
+    payload = _batch_draft_payload(
+        topics,
+        vector_store=vector_store,
+        source_tags=source_tags,
+    )
 
     prompt = batch_note_draft_prompt(
         source=source,
@@ -875,7 +944,18 @@ def _build_suggestion(
     body = pre_drafted_body
     if body is None and use_llm:
         # May raise (e.g. rate limit / budget); the caller decides how to recover.
-        body = _llm_draft_topic_body(source, topic, topic_links, budget=budget)
+        vault_context = _vault_context_for_topic(
+            vector_store,
+            topic,
+            source_tags=source_tags,
+        )
+        body = _llm_draft_topic_body(
+            source,
+            topic,
+            topic_links,
+            budget=budget,
+            vault_context=vault_context,
+        )
     body = body or _fallback_topic_body(topic)
     body = _strip_source_section(body)
 
@@ -1172,12 +1252,16 @@ def iter_note_suggestions(
                 related_links,
                 budget,
                 max_size=batch_size,
+                vector_store=vector_store,
+                source_tags=list(source.tags) if source.tags else None,
             )
             if take == 0:
                 next_chars = _batch_draft_prompt_chars(
                     source,
                     remaining_topics[:1],
                     related_links,
+                    vector_store=vector_store,
+                    source_tags=list(source.tags) if source.tags else None,
                 )
                 llm_disabled = True
                 yield record_warning(budget.refuse(next_chars))
@@ -1207,6 +1291,8 @@ def iter_note_suggestions(
                         topics_for_call,
                         related_links,
                         budget=budget,
+                        vector_store=vector_store,
+                        source_tags=list(source.tags) if source.tags else None,
                     )
 
                 bodies = call_with_retry(draft_batch)
@@ -1404,7 +1490,11 @@ def iter_note_suggestions(
                 "message": f"Added map-of-content index: {moc.note_path}",
             }
 
+    # Quality scores + near-duplicate detection across the proposed set.
+    annotate_note_intelligence(suggestions, vector_store)
+
     if checkpoint is not None:
+        checkpoint.replace_suggestions([item.to_dict() for item in suggestions])
         checkpoint.finish(completed=True)
 
     if budget.calls:

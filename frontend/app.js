@@ -3,6 +3,16 @@ const indexBtn = document.getElementById("indexBtn");
 const calibrateBtn = document.getElementById("calibrateBtn");
 const vaultWatchToggle = document.getElementById("vaultWatchToggle");
 const statusBox = document.getElementById("statusBox");
+const thresholdSummary = document.getElementById("thresholdSummary");
+const calibrationResult = document.getElementById("calibrationResult");
+const calibrationSummary = document.getElementById("calibrationSummary");
+const applyThresholdsBtn = document.getElementById("applyThresholdsBtn");
+const vaultSearchForm = document.getElementById("vaultSearchForm");
+const vaultSearchQuery = document.getElementById("vaultSearchQuery");
+const vaultSearchMode = document.getElementById("vaultSearchMode");
+const vaultSearchBtn = document.getElementById("vaultSearchBtn");
+const vaultSearchMessage = document.getElementById("vaultSearchMessage");
+const vaultSearchResults = document.getElementById("vaultSearchResults");
 const sourceUrlInput = document.getElementById("sourceUrl");
 const sourceFileInput = document.getElementById("sourceFile");
 const vaultNotePathInput = document.getElementById("vaultNotePath");
@@ -41,12 +51,19 @@ const prevPageBtn = document.getElementById("prevPageBtn");
 const nextPageBtn = document.getElementById("nextPageBtn");
 const pageLabel = document.getElementById("pageLabel");
 const recoverBtn = document.getElementById("recoverBtn");
+const exportCheckpointsBtn = document.getElementById("exportCheckpointsBtn");
+const importCheckpointsInput = document.getElementById("importCheckpointsInput");
 const continueBtn = document.getElementById("continueBtn");
 const warningsBox = document.getElementById("warningsBox");
 const tagOverlapBox = document.getElementById("tagOverlapBox");
 const tagOverlapList = document.getElementById("tagOverlapList");
 const sourceMeta = document.getElementById("sourceMeta");
 const analysisConfig = document.getElementById("analysisConfig");
+const graphFilter = document.getElementById("graphFilter");
+const graphScope = document.getElementById("graphScope");
+const graphExportPng = document.getElementById("graphExportPng");
+const graphExportJson = document.getElementById("graphExportJson");
+const graphFilterSummary = document.getElementById("graphFilterSummary");
 const authDialog = document.getElementById("authDialog");
 const authForm = document.getElementById("authForm");
 const authCancelBtn = document.getElementById("authCancelBtn");
@@ -55,8 +72,10 @@ const authError = document.getElementById("authError");
 const {
   buildAnalyzeFormData,
   buildPreviewPayload,
+  buildSearchResultHtml,
   escapeHtml,
   isAbortError,
+  lineDiff,
   markdownToSafeHtml,
   readNdjsonResponse,
   sourceInputState,
@@ -64,12 +83,15 @@ const {
 } = KdaWebCore;
 
 let graphNetwork = null;
+let currentGraphData = null;
+let currentFilteredGraph = null;
 let currentSuggestions = [];
 let currentPage = 1;
 let pageSize = 10;
 let obsidianVaultName = null;
 let obsidianUriEnabled = false;
 let latestStatus = null;
+let latestCalibration = null;
 let activeAnalyzeController = null;
 let pendingAuthRequest = null;
 const API_TOKEN_KEY = "actualizer_api_token";
@@ -286,6 +308,9 @@ async function loadStatus() {
     const recommended = status.thresholds && status.thresholds.recommended;
     if (recommended) {
       statusBox.textContent += ` | Thresholds: novel=${status.thresholds.novel} known=${status.thresholds.known}`;
+      thresholdSummary.textContent =
+        `Current: novel ${status.thresholds.novel}, known ${status.thresholds.known}. ` +
+        `Model starting point: novel ${recommended.novel_threshold}, known ${recommended.known_threshold}.`;
     }
 
     const calibrationAvailable = status.thresholds && status.thresholds.calibration_available;
@@ -333,11 +358,60 @@ async function loadStatus() {
     } else {
       statusBox.className = "text-sm text-slate-600";
     }
+    const thresholdWarnings = warnings.filter((message) =>
+      /threshold/i.test(String(message))
+    );
+    if (thresholdWarnings.length) {
+      thresholdSummary.textContent += ` Recommendation: ${thresholdWarnings.join(" ")}`;
+      thresholdSummary.className = "text-amber-700";
+    } else {
+      thresholdSummary.className = "text-slate-600";
+    }
   } catch (error) {
     statusBox.textContent = `Failed to load status: ${error.message}`;
     statusBox.className = "text-sm text-red-600";
   }
 }
+
+vaultSearchForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const query = vaultSearchQuery.value.trim();
+  if (!query) {
+    vaultSearchMessage.textContent = "Enter a search query.";
+    return;
+  }
+  vaultSearchBtn.disabled = true;
+  vaultSearchMessage.textContent = "Searching…";
+  vaultSearchMessage.className = "text-sm text-slate-500";
+  vaultSearchResults.innerHTML = "";
+  try {
+    const params = new URLSearchParams({
+      q: query,
+      mode: vaultSearchMode.value,
+      top_k: "15",
+    });
+    const vaultPath = vaultPathInput.value.trim();
+    if (vaultPath) params.set("vault_path", vaultPath);
+    const result = await fetchJson(`/api/vault/search?${params}`);
+    const matches = result.results || [];
+    vaultSearchMessage.textContent = `${matches.length} result${matches.length === 1 ? "" : "s"} (${result.mode}).`;
+    vaultSearchResults.innerHTML = matches.length
+      ? matches.map(buildSearchResultHtml).join("")
+      : "<li class='text-sm text-slate-500'>No matching indexed chunks found.</li>";
+    const paths = [...new Set(matches.map((item) => item.note_path).filter(Boolean))];
+    if (paths.length) {
+      const graphData = await fetchJson(
+        `/api/vault/graph?highlight=${encodeURIComponent(paths.join(","))}`
+      );
+      renderGraph(graphData);
+    }
+  } catch (error) {
+    vaultSearchMessage.textContent = `Search failed: ${error.message}`;
+    vaultSearchMessage.className = "text-sm text-red-600";
+  } finally {
+    vaultSearchBtn.disabled = false;
+  }
+});
 
 indexBtn.addEventListener("click", async () => {
   analyzeError.classList.add("hidden");
@@ -377,6 +451,7 @@ calibrateBtn.addEventListener("click", async () => {
 
   try {
     const result = await fetchJson("/api/vault/thresholds/calibrate");
+    latestCalibration = result;
     const lines = [
       result.message || "Threshold calibration complete.",
       `Samples: ${result.sample_size} (${result.same_note_samples} same-note, ${result.cross_note_samples} cross-note)`,
@@ -385,9 +460,10 @@ calibrateBtn.addEventListener("click", async () => {
     ];
     if (result.fallback) {
       lines.push("(Using provider defaults — not enough data for vault-specific calibration.)");
-    } else {
-      lines.push("Update NOVEL_THRESHOLD and KNOWN_THRESHOLD in .env to apply these values.");
     }
+    calibrationSummary.textContent = lines.join(" ");
+    calibrationSummary.className = "text-slate-700";
+    calibrationResult.classList.remove("hidden");
     statusBox.textContent = lines.join("\n");
     statusBox.className = "text-sm text-slate-600 whitespace-pre-wrap";
     await loadStatus();
@@ -397,6 +473,32 @@ calibrateBtn.addEventListener("click", async () => {
   } finally {
     calibrateBtn.disabled = false;
     calibrateBtn.textContent = "Calibrate thresholds";
+  }
+});
+
+applyThresholdsBtn.addEventListener("click", async () => {
+  if (!latestCalibration) return;
+  applyThresholdsBtn.disabled = true;
+  try {
+    const result = await fetchJson("/api/vault/thresholds", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        novel: latestCalibration.recommended_novel_threshold,
+        known: latestCalibration.recommended_known_threshold,
+        persist: true,
+      }),
+    });
+    calibrationSummary.textContent =
+      `Applied novel ${result.novel} and known ${result.known}` +
+      (result.persisted ? " to this session and .env." : " to this session.");
+    calibrationSummary.className = "text-slate-700";
+    await loadStatus();
+  } catch (error) {
+    calibrationSummary.textContent = `Could not apply thresholds: ${error.message}`;
+    calibrationSummary.className = "text-red-600";
+  } finally {
+    applyThresholdsBtn.disabled = false;
   }
 });
 
@@ -600,7 +702,10 @@ function updateSuggestionCount() {
 function renderSuggestions(suggestions) {
   currentSuggestions = (suggestions || []).map((item) => ({
     ...item,
-    selected: item.is_moc || item.is_novel === false ? false : item.selected !== false,
+    selected:
+      item.is_moc || item.is_novel === false || item.duplicate_of
+        ? false
+        : item.selected !== false,
     write_mode: item.write_mode || "write",
   }));
   currentPage = 1;
@@ -641,6 +746,13 @@ function renderSuggestionsPage() {
       !suggestion.is_moc && suggestion.is_novel === false
         ? '<span class="text-xs px-2 py-0.5 rounded-full bg-slate-200 text-slate-700">Known / partial</span>'
         : "";
+    const duplicateBadge = suggestion.duplicate_of
+      ? `<span class="text-xs px-2 py-0.5 rounded-full bg-rose-100 text-rose-800" title="Near-duplicate of ${escapeHtml(suggestion.duplicate_of)}">Duplicate${suggestion.duplicate_similarity != null ? ` ${suggestion.duplicate_similarity}` : ""}</span>`
+      : "";
+    const qualityBadge =
+      !suggestion.is_moc && suggestion.quality_score != null
+        ? `<span class="text-xs px-2 py-0.5 rounded-full bg-sky-50 text-sky-800" title="${escapeHtml((suggestion.quality_flags || []).join(", ") || "Heuristic structure score")}">Quality ${Number(suggestion.quality_score).toFixed(2)}</span>`
+        : "";
     const appendSectionHint =
       suggestion.append_heading && suggestion.write_mode === "append"
         ? `<div class="text-xs text-slate-500">Appending under section: <code>${escapeHtml(suggestion.append_heading)}</code></div>`
@@ -648,6 +760,13 @@ function renderSuggestionsPage() {
     const overlapHint =
       suggestion.append_target && suggestion.overlap_similarity != null
         ? `<div class="text-xs text-slate-500">High overlap (${suggestion.overlap_similarity}) with <code>${escapeHtml(suggestion.append_target)}</code>${suggestion.append_heading ? ` · section <code>${escapeHtml(suggestion.append_heading)}</code>` : ""}</div>`
+        : "";
+    const duplicateHint = suggestion.duplicate_of
+      ? `<div class="text-xs text-rose-700">Near-duplicate of <code>${escapeHtml(suggestion.duplicate_of)}</code>${suggestion.duplicate_similarity != null ? ` (similarity ${suggestion.duplicate_similarity})` : ""}. Deselected by default.</div>`
+      : "";
+    const qualityHint =
+      !suggestion.is_moc && suggestion.quality_score != null && (suggestion.quality_flags || []).length
+        ? `<div class="text-xs text-slate-500">Quality flags: ${escapeHtml((suggestion.quality_flags || []).join(", "))}</div>`
         : "";
     const appendControls =
       suggestion.append_target && !suggestion.is_moc
@@ -663,10 +782,6 @@ function renderSuggestionsPage() {
                 Append to existing
               </label>
             </div>
-            <details class="append-diff-details mt-2">
-              <summary class="text-xs text-indigo-600 cursor-pointer">Preview exact merged note</summary>
-              <div class="append-diff mt-2 grid md:grid-cols-2 gap-3 text-xs"></div>
-            </details>
           </div>`
         : "";
 
@@ -677,14 +792,22 @@ function renderSuggestionsPage() {
           <span>#${index + 1} · ${escapeHtml(suggestion.concept_title)}</span>
           ${mocBadge}
           ${knownBadge}
+          ${duplicateBadge}
+          ${qualityBadge}
         </label>
         <span class="text-xs px-2 py-1 rounded-full bg-white border text-slate-600 whitespace-nowrap">
           ${escapeHtml(suggestion.location?.display || "unknown location")}
         </span>
       </div>
       ${overlapHint}
+      ${duplicateHint}
+      ${qualityHint}
       ${appendSectionHint}
       ${appendControls}
+      <details class="note-diff-details rounded-lg border bg-white p-3" open>
+        <summary class="text-sm font-medium text-indigo-700 cursor-pointer">Exact changes on apply</summary>
+        <div class="note-diff mt-2 text-xs"></div>
+      </details>
       <div class="space-y-1">
         <label for="note-path-${index}" class="text-xs font-medium text-slate-500">Vault path</label>
         <input id="note-path-${index}" data-field="note_path" data-index="${index}" class="w-full border rounded-lg px-3 py-2 text-sm bg-white" />
@@ -730,10 +853,18 @@ function renderSuggestionsPage() {
         const card = event.target.closest("[data-suggestion-card]");
         const rendered = card?.querySelector(".markdown-preview");
         if (rendered) rendered.innerHTML = markdownToSafeHtml(event.target.value);
-        const diffDetails = card?.querySelector(".append-diff-details");
-        if (diffDetails?.open && currentSuggestions[idx].write_mode === "append") {
+        const diffDetails = card?.querySelector(".note-diff-details");
+        if (diffDetails?.open) {
           clearTimeout(currentSuggestions[idx]._previewTimer);
-          currentSuggestions[idx]._previewTimer = setTimeout(() => refreshAppendDiff(idx), 250);
+          currentSuggestions[idx]._previewTimer = setTimeout(() => refreshNoteDiff(idx), 250);
+        }
+      }
+      if (field === "note_path") {
+        const card = event.target.closest("[data-suggestion-card]");
+        const diffDetails = card?.querySelector(".note-diff-details");
+        if (diffDetails?.open) {
+          clearTimeout(currentSuggestions[idx]._previewTimer);
+          currentSuggestions[idx]._previewTimer = setTimeout(() => refreshNoteDiff(idx), 250);
         }
       }
     });
@@ -757,9 +888,7 @@ function renderSuggestionsPage() {
           pathInput.value = suggestion._original_note_path;
         }
       }
-      if (suggestion.write_mode === "append") {
-        await refreshAppendDiff(idx);
-      }
+      await refreshNoteDiff(idx);
     });
   });
 
@@ -770,7 +899,7 @@ function renderSuggestionsPage() {
     }
   }
 
-  suggestionsList.querySelectorAll(".append-diff-details").forEach((details) => {
+  suggestionsList.querySelectorAll(".note-diff-details").forEach((details) => {
     details.addEventListener("toggle", async (event) => {
       if (!event.target.open) {
         return;
@@ -778,10 +907,14 @@ function renderSuggestionsPage() {
       const card = event.target.closest("[data-suggestion-card]");
       const idx = Number(card?.querySelector("[data-index]")?.dataset.index);
       if (!Number.isNaN(idx)) {
-        await refreshAppendDiff(idx);
+        await refreshNoteDiff(idx);
       }
     });
   });
+
+  for (let index = start; index < end; index += 1) {
+    refreshNoteDiff(index);
+  }
 
   if (pageSize === "all" || pages <= 1) {
     suggestionPager.classList.add("hidden");
@@ -794,20 +927,36 @@ function renderSuggestionsPage() {
   }
 }
 
-async function refreshAppendDiff(index) {
+function renderLineDiff(existingContent, finalContent) {
+  const changes = lineDiff(existingContent, finalContent);
+  return changes
+    .map(({ type, line }) => {
+      const prefix = type === "add" ? "+" : type === "remove" ? "−" : " ";
+      const style =
+        type === "add"
+          ? "bg-emerald-50 text-emerald-900"
+          : type === "remove"
+            ? "bg-red-50 text-red-900"
+            : "text-slate-600";
+      return `<div class="${style} px-2 whitespace-pre-wrap break-all"><span class="select-none inline-block w-4">${prefix}</span>${escapeHtml(line)}</div>`;
+    })
+    .join("");
+}
+
+async function refreshNoteDiff(index) {
   const suggestion = currentSuggestions[index];
-  if (!suggestion?.append_target) {
+  if (!suggestion?.note_path) {
     return;
   }
   const pathInput = suggestionsList.querySelector(`[data-field="note_path"][data-index="${index}"]`);
   const card = pathInput?.closest("[data-suggestion-card]");
-  const diffHost = card?.querySelector(".append-diff");
+  const diffHost = card?.querySelector(".note-diff");
   if (!diffHost) {
     return;
   }
   const requestId = (suggestion._previewRequestId || 0) + 1;
   suggestion._previewRequestId = requestId;
-  diffHost.innerHTML = "<div class='text-slate-500 col-span-2' role='status'>Loading canonical preview…</div>";
+  diffHost.innerHTML = "<div class='text-slate-500' role='status'>Loading canonical preview…</div>";
   try {
     const payload = buildPreviewPayload(suggestion, vaultPathInput.value);
     const preview = await fetchJson("/api/suggestions/preview", {
@@ -816,23 +965,15 @@ async function refreshAppendDiff(index) {
       body: JSON.stringify(payload),
     });
     if (suggestion._previewRequestId !== requestId) return;
-    const existingContent = preview.exists
-      ? preview.existing_content
-      : "(note not found — the final content below will create it)";
     const writeStatus = preview.will_write
-      ? "This is the exact content the apply API will write."
+      ? suggestion.write_mode === "append"
+        ? "This is the exact content the apply API will write."
+        : "This is the exact content written for a new file or after overwrite confirmation."
       : "The apply API would not write this change with the current options.";
     diffHost.innerHTML = `
-      <div class="space-y-1">
-        <div class="font-medium text-slate-600">Existing note context</div>
-        <pre class="border rounded p-2 bg-slate-50 whitespace-pre-wrap max-h-64 overflow-auto">${escapeHtml(existingContent)}</pre>
-      </div>
-      <div class="space-y-1">
-        <div class="font-medium text-slate-600">Exact final merged content</div>
-        <pre class="border rounded p-2 bg-emerald-50 whitespace-pre-wrap max-h-64 overflow-auto">${escapeHtml(preview.final_content)}</pre>
-      </div>
-      <div class="col-span-2 text-slate-600">${escapeHtml(writeStatus)}</div>
-      <details class="col-span-2 rounded border bg-white p-2">
+      <div class="border rounded bg-slate-50 max-h-72 overflow-auto font-mono">${renderLineDiff(preview.existing_content, preview.final_content)}</div>
+      <div class="mt-2 text-slate-600">${escapeHtml(preview.exists ? writeStatus : "New file — every line shown above will be added.")}</div>
+      <details class="mt-2 rounded border bg-white p-2">
         <summary class="font-medium text-indigo-700 cursor-pointer">Rendered final note</summary>
         <div class="markdown-preview mt-2 border-t pt-2">${markdownToSafeHtml(preview.final_content)}</div>
       </details>
@@ -843,43 +984,44 @@ async function refreshAppendDiff(index) {
   }
 }
 
-function renderGraph(graphData) {
-  const container = document.getElementById("graph");
+function filterGraphData(graphData) {
+  const query = graphFilter.value.trim().toLocaleLowerCase();
+  const scope = graphScope.value;
+  let allowed = new Set(graphData.nodes.map((node) => node.id));
+  if (scope !== "all") {
+    const highlighted = new Set(
+      graphData.nodes.filter((node) => node.highlighted).map((node) => node.id)
+    );
+    allowed = new Set(highlighted);
+    const hops = Number(scope);
+    if (Number.isFinite(hops) && hops > 0) {
+      let frontier = new Set(highlighted);
+      for (let depth = 0; depth < hops; depth += 1) {
+        const next = new Set();
+        for (const edge of graphData.edges || []) {
+          if (frontier.has(edge.from)) next.add(edge.to);
+          if (frontier.has(edge.to)) next.add(edge.from);
+        }
+        next.forEach((id) => allowed.add(id));
+        frontier = next;
+      }
+    }
+  }
+  const nodes = graphData.nodes.filter((node) => {
+    if (!allowed.has(node.id)) return false;
+    if (!query) return true;
+    const searchable = `${node.label || ""} ${node.id} ${(node.tags || []).join(" ")}`.toLocaleLowerCase();
+    return searchable.includes(query);
+  });
+  const visible = new Set(nodes.map((node) => node.id));
+  const edges = (graphData.edges || []).filter(
+    (edge) => visible.has(edge.from) && visible.has(edge.to)
+  );
+  return { nodes, edges };
+}
+
+function renderGraphText(graphData) {
   const textContainer = document.getElementById("graphText");
-  if (!graphData || !graphData.nodes || !graphData.nodes.length) {
-    container.innerHTML = "<p class='text-sm text-slate-500 p-4'>No graph data available. Index your vault first.</p>";
-    textContainer.innerHTML = "<p>No graph nodes or links are available.</p>";
-    return;
-  }
-
-  container.innerHTML = "";
-  const nodes = new vis.DataSet(
-    graphData.nodes.map((node) => ({
-      ...node,
-      color: node.highlighted ? "#4f46e5" : "#94a3b8",
-      font: { color: node.highlighted ? "#1e1b4b" : "#334155" },
-    }))
-  );
-  const edges = new vis.DataSet(
-    (graphData.edges || []).map((edge) => {
-      // Never render text on the edge itself (it just repeats the target node's
-      // title); expose the link as a hover tooltip instead.
-      const { label, title, ...rest } = edge;
-      return { ...rest, title: title || label || undefined };
-    })
-  );
-  const data = { nodes, edges };
-  const options = {
-    physics: { stabilization: true },
-    interaction: { hover: true },
-    edges: { arrows: "to", color: "#cbd5e1", font: { align: "horizontal" }, smooth: true },
-  };
-
-  if (graphNetwork) {
-    graphNetwork.destroy();
-  }
-  graphNetwork = new vis.Network(container, data, options);
-
   const labelById = new Map(graphData.nodes.map((node) => [node.id, node.label || node.id]));
   const highlighted = graphData.nodes.filter((node) => node.highlighted);
   const nodeSummary = highlighted.length
@@ -897,6 +1039,61 @@ function renderGraph(graphData) {
     (edgesList
       ? `<p class="mt-2 font-medium">Links (${graphData.edges.length})</p><ul class="list-disc ml-5 mt-1 max-h-64 overflow-auto">${edgesList}</ul>`
       : "<p class='mt-2'>No links between these notes.</p>");
+}
+
+function applyGraphFilters() {
+  if (!currentGraphData || !graphNetwork) return;
+  currentFilteredGraph = filterGraphData(currentGraphData);
+  const nodes = new vis.DataSet(
+    currentFilteredGraph.nodes.map((node) => ({
+      ...node,
+      title: (node.tags || []).length ? `Tags: ${(node.tags || []).join(", ")}` : undefined,
+      color: node.highlighted ? "#4f46e5" : "#94a3b8",
+      font: { color: node.highlighted ? "#1e1b4b" : "#334155" },
+    }))
+  );
+  const edges = new vis.DataSet(
+    currentFilteredGraph.edges.map((edge) => {
+      const { label, title, ...rest } = edge;
+      return { ...rest, title: title || label || undefined };
+    })
+  );
+  graphNetwork.setData({ nodes, edges });
+  graphFilterSummary.textContent =
+    `Showing ${currentFilteredGraph.nodes.length} of ${currentGraphData.nodes.length} nodes ` +
+    `and ${currentFilteredGraph.edges.length} links.`;
+  renderGraphText(currentFilteredGraph);
+}
+
+function renderGraph(graphData) {
+  const container = document.getElementById("graph");
+  const textContainer = document.getElementById("graphText");
+  if (!graphData || !graphData.nodes || !graphData.nodes.length) {
+    if (graphNetwork) {
+      graphNetwork.destroy();
+      graphNetwork = null;
+    }
+    currentGraphData = null;
+    currentFilteredGraph = null;
+    container.innerHTML = "<p class='text-sm text-slate-500 p-4'>No graph data available. Index your vault first.</p>";
+    textContainer.innerHTML = "<p>No graph nodes or links are available.</p>";
+    graphFilterSummary.textContent = "";
+    return;
+  }
+
+  container.innerHTML = "";
+  const options = {
+    physics: { stabilization: true },
+    interaction: { hover: true },
+    edges: { arrows: "to", color: "#cbd5e1", font: { align: "horizontal" }, smooth: true },
+  };
+
+  if (graphNetwork) {
+    graphNetwork.destroy();
+  }
+  graphNetwork = new vis.Network(container, { nodes: [], edges: [] }, options);
+  currentGraphData = graphData;
+  applyGraphFilters();
 }
 
 function renderResult(result) {
@@ -1132,6 +1329,47 @@ recoverBtn.addEventListener("click", async () => {
   }
 });
 
+exportCheckpointsBtn.addEventListener("click", async () => {
+  exportCheckpointsBtn.disabled = true;
+  try {
+    const payload = await fetchJson("/api/suggestions/checkpoint/export");
+    downloadBlob(
+      new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }),
+      "actualizer-checkpoints.json"
+    );
+  } catch (error) {
+    analyzeError.textContent = `Checkpoint export failed: ${error.message}`;
+    analyzeError.classList.remove("hidden");
+  } finally {
+    exportCheckpointsBtn.disabled = false;
+  }
+});
+
+importCheckpointsInput.addEventListener("change", async () => {
+  const file = importCheckpointsInput.files?.[0];
+  if (!file) return;
+  try {
+    if (file.size > 10 * 1024 * 1024) {
+      throw new Error("Checkpoint bundle exceeds the 10 MB browser import limit.");
+    }
+    const payload = JSON.parse(await file.text());
+    const result = await fetchJson("/api/suggestions/checkpoint/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    applyMessage.textContent = `Imported ${result.imported} checkpoint(s).`;
+    applyMessage.className = "text-sm text-emerald-700";
+    await refreshResumeState();
+    await loadStatus();
+  } catch (error) {
+    analyzeError.textContent = `Checkpoint import failed: ${error.message}`;
+    analyzeError.classList.remove("hidden");
+  } finally {
+    importCheckpointsInput.value = "";
+  }
+});
+
 pageSizeSelect.addEventListener("change", (event) => {
   const value = event.target.value;
   pageSize = value === "all" ? "all" : Number(value);
@@ -1317,6 +1555,38 @@ if (vaultWatchToggle) {
     }
   });
 }
+
+graphFilter.addEventListener("input", applyGraphFilters);
+graphScope.addEventListener("change", applyGraphFilters);
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+graphExportJson.addEventListener("click", () => {
+  if (!currentFilteredGraph) return;
+  downloadBlob(
+    new Blob([JSON.stringify(currentFilteredGraph, null, 2)], {
+      type: "application/json",
+    }),
+    "actualizer-graph.json"
+  );
+});
+
+graphExportPng.addEventListener("click", () => {
+  const canvas = document.querySelector("#graph canvas");
+  if (!canvas) return;
+  canvas.toBlob((blob) => {
+    if (blob) downloadBlob(blob, "actualizer-graph.png");
+  }, "image/png");
+});
 
 syncSourceInputs();
 loadStatus();

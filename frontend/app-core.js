@@ -215,10 +215,77 @@
       note_path: String(suggestion?.note_path || suggestion?.append_target || "").trim(),
       content: String(suggestion?.content ?? ""),
       mode: suggestion?.write_mode === "append" ? "append" : "write",
-      overwrite: false,
+      overwrite:
+        suggestion?.write_mode === "append" ? false : suggestion?.preview_overwrite !== false,
       append_heading:
         suggestion?.write_mode === "append" ? suggestion?.append_heading || null : null,
     };
+  }
+
+  function buildSearchResultHtml(result) {
+    const title = escapeHtml(result?.note_title || result?.note_path || "Untitled note");
+    const path = escapeHtml(result?.note_path || "");
+    const heading = result?.heading
+      ? `<span class="text-slate-500"> · ${escapeHtml(result.heading)}</span>`
+      : "";
+    const score = Number.isFinite(Number(result?.score))
+      ? `<span class="text-xs text-slate-500">Score: ${escapeHtml(result.score)}</span>`
+      : "";
+    const uri = String(result?.obsidian_uri || "");
+    const openLink = uri.startsWith("obsidian://")
+      ? `<a href="${escapeHtml(uri)}" class="text-xs text-indigo-600 hover:underline">Open in Obsidian</a>`
+      : "";
+    return `<li class="border rounded-lg p-3 space-y-1">
+      <div class="flex items-start justify-between gap-2"><div class="font-medium">${title}${heading}</div>${openLink}</div>
+      <div class="text-xs text-slate-500">${path}</div>
+      <div class="text-sm text-slate-700 whitespace-pre-wrap">${escapeHtml(result?.snippet || "")}</div>
+      ${score}
+    </li>`;
+  }
+
+  function lineDiff(before, after) {
+    const left = String(before ?? "").replace(/\r\n?/g, "\n").split("\n");
+    const right = String(after ?? "").replace(/\r\n?/g, "\n").split("\n");
+    // Bound quadratic work for unusually large notes.
+    if (left.length * right.length > 1_000_000) {
+      if (String(before ?? "") === String(after ?? "")) {
+        return left.map((line) => ({ type: "same", line }));
+      }
+      return [
+        ...left.map((line) => ({ type: "remove", line })),
+        ...right.map((line) => ({ type: "add", line })),
+      ];
+    }
+    const table = Array.from({ length: left.length + 1 }, () =>
+      new Uint32Array(right.length + 1)
+    );
+    for (let i = left.length - 1; i >= 0; i -= 1) {
+      for (let j = right.length - 1; j >= 0; j -= 1) {
+        table[i][j] =
+          left[i] === right[j]
+            ? table[i + 1][j + 1] + 1
+            : Math.max(table[i + 1][j], table[i][j + 1]);
+      }
+    }
+    const changes = [];
+    let i = 0;
+    let j = 0;
+    while (i < left.length && j < right.length) {
+      if (left[i] === right[j]) {
+        changes.push({ type: "same", line: left[i] });
+        i += 1;
+        j += 1;
+      } else if (table[i + 1][j] >= table[i][j + 1]) {
+        changes.push({ type: "remove", line: left[i] });
+        i += 1;
+      } else {
+        changes.push({ type: "add", line: right[j] });
+        j += 1;
+      }
+    }
+    while (i < left.length) changes.push({ type: "remove", line: left[i++] });
+    while (j < right.length) changes.push({ type: "add", line: right[j++] });
+    return changes;
   }
 
   function isAbortError(error) {
@@ -229,9 +296,11 @@
     ALLOWED_FILE_EXTENSIONS,
     buildAnalyzeFormData,
     buildPreviewPayload,
+    buildSearchResultHtml,
     createNdjsonParser,
     escapeHtml,
     isAbortError,
+    lineDiff,
     markdownToSafeHtml,
     readNdjsonResponse,
     sourceInputState,

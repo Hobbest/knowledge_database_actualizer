@@ -455,10 +455,17 @@ are reported on index — use a path-qualified link for those.
 - **Threshold assistant:** use **Calibrate thresholds** in the web UI or `GET /api/vault/thresholds/calibrate` after indexing (available when the index has enough chunks).
 - **Block references:** set `INCLUDE_BLOCK_IDS=true` to append Obsidian `^block-id` suffixes to bullets and paragraphs when notes are written.
 
+## Intelligence & automation (Phase 6)
+
+- **Draft-time RAG:** with `DRAFT_RAG_ENABLED=true` (default), each LLM draft prompt receives short vault excerpts (`DRAFT_RAG_TOP_K`, `DRAFT_RAG_EXCERPT_CHARS`) so Related notes can cite real vault paths instead of inventing them.
+- **Duplicate detection:** after drafting, near-duplicate proposals are flagged (`DUPLICATE_DETECTION_ENABLED`, `DUPLICATE_SIMILARITY_THRESHOLD`) and deselected by default in the UI.
+- **Quality scoring:** heuristic 0–1 scores (`NOTE_QUALITY_SCORING_ENABLED`) highlight structural issues (heading mismatch, weak definition, missing related links).
+- **Domain embeddings:** pick any supported local Hugging Face or Gemini embedding model via `EMBEDDING_PROVIDER` / `EMBEDDING_MODEL` (no separate fine-tuning pipeline).
+
 ## Project structure
 
 ```
-app/
+  app/
   config.py          # settings
   vault.py           # markdown + wikilink parsing
   chunking.py        # text chunking
@@ -468,6 +475,7 @@ app/
   novelty.py         # verdict logic
   llm.py             # optional LLM providers
   suggest.py         # draft + apply notes
+  note_intelligence.py  # draft RAG, quality scores, duplicate detection
   note_output.py     # note path patterns + append helpers
   vault_watcher.py   # debounced index-on-save
   sources/           # YouTube, web article, PDF, EPUB, DOCX, text loaders

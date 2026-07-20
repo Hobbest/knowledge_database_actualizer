@@ -46,6 +46,12 @@ ENV_SECTIONS: tuple[EnvSection, ...] = (
     ),
     EnvSection(
         header=(
+            "# Application logging: LOG_FORMAT is plain or json; LOG_LEVEL controls verbosity",
+        ),
+        fields=("log_level", "log_format"),
+    ),
+    EnvSection(
+        header=(
             "# Embeddings (used for novelty/similarity search — separate from LLM note drafting)",
             "# EMBEDDING_PROVIDER: local (sentence-transformers) or gemini",
             "# Local models: all-MiniLM-L6-v2 (default, fast), all-mpnet-base-v2, bge-small-en-v1.5",
@@ -225,6 +231,24 @@ ENV_SECTIONS: tuple[EnvSection, ...] = (
             "include_block_ids",
             "link_sibling_notes",
             "sibling_link_count",
+        ),
+    ),
+    EnvSection(
+        header=(
+            "# Intelligence & automation (Phase 6)",
+            "# DRAFT_RAG_* — inject vault excerpts into LLM draft prompts for cross-refs",
+            "# DUPLICATE_* — flag near-duplicate proposed notes after drafting",
+            "# NOTE_QUALITY_SCORING_ENABLED — heuristic structure score on each draft",
+            "# Domain-specific embeddings: set EMBEDDING_PROVIDER/EMBEDDING_MODEL to any",
+            "# supported local HF or Gemini model (no fine-tuning pipeline required).",
+        ),
+        fields=(
+            "draft_rag_enabled",
+            "draft_rag_top_k",
+            "draft_rag_excerpt_chars",
+            "duplicate_detection_enabled",
+            "duplicate_similarity_threshold",
+            "note_quality_scoring_enabled",
         ),
     ),
     EnvSection(

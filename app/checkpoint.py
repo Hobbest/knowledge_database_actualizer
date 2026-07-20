@@ -234,6 +234,11 @@ class SuggestionCheckpoint:
         self._state["completed"] = completed
         self._flush()
 
+    def replace_suggestions(self, suggestions: list[dict]) -> None:
+        """Overwrite saved notes (e.g. after quality / duplicate annotations)."""
+        self._state["suggestions"] = list(suggestions)
+        self._flush()
+
     @property
     def suggestions(self) -> list[dict]:
         return list(self._state["suggestions"])
@@ -305,6 +310,83 @@ def load_latest_checkpoint() -> dict | None:
         if data:
             return data
     return None
+
+
+def export_checkpoints(source_key: str | None = None) -> dict:
+    """Return a versioned, portable checkpoint bundle."""
+    _ensure_migrated()
+    if source_key:
+        item = load_checkpoint_by_key(source_key)
+        checkpoints = [item] if item else []
+    else:
+        checkpoints = []
+        for entry in _load_manifest_unlocked()["entries"]:
+            data = _load_checkpoint_file(checkpoint_dir() / str(entry.get("file", "")))
+            if data:
+                checkpoints.append(data)
+    return {
+        "format": "knowledge-database-actualizer-checkpoints",
+        "version": 1,
+        "exported_at": _now(),
+        "checkpoints": checkpoints,
+    }
+
+
+def import_checkpoints(payload: dict) -> dict:
+    """Validate and atomically import a portable checkpoint bundle."""
+    if not isinstance(payload, dict):
+        raise ValueError("Checkpoint import must be a JSON object")
+    if payload.get("format") == "knowledge-database-actualizer-checkpoints":
+        items = payload.get("checkpoints")
+    else:
+        # Also accept one raw checkpoint exported/copied from data/checkpoints.
+        items = [payload]
+    if not isinstance(items, list) or not items:
+        raise ValueError("Checkpoint bundle contains no checkpoints")
+
+    imported: list[str] = []
+    with CHECKPOINT_LOCK:
+        _migrate_legacy_latest_unlocked()
+        for state in items:
+            if not isinstance(state, dict):
+                raise ValueError("Every checkpoint must be a JSON object")
+            source = state.get("source")
+            suggestions = state.get("suggestions")
+            if not isinstance(source, dict) or not isinstance(suggestions, list):
+                raise ValueError("Checkpoint requires source metadata and a suggestions list")
+            source_key = str(source.get("source_key") or "").strip() or normalize_source_key(
+                source.get("source_type"),
+                source.get("source_ref"),
+            )
+            if not source_key:
+                raise ValueError("Checkpoint source identity is missing")
+            basename = _safe_checkpoint_basename(source_key)
+            if basename in {Path(MANIFEST_NAME).stem, Path(LEGACY_LATEST).stem}:
+                raise ValueError("Checkpoint source identity is reserved")
+            target = checkpoint_path_for(source_key)
+            clean_state = dict(state)
+            clean_source = dict(source)
+            clean_source["source_key"] = source_key
+            clean_state["source"] = clean_source
+            clean_state["updated_at"] = _now()
+            clean_state.setdefault("created_at", clean_state["updated_at"])
+            clean_state.setdefault("completed", False)
+            clean_state.setdefault("warnings", [])
+            clean_state.setdefault("plan", None)
+            clean_state.setdefault("novelty", None)
+            clean_state.setdefault("plan_fingerprint", None)
+
+            fd, tmp_name = tempfile.mkstemp(dir=str(checkpoint_dir()), suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(clean_state, handle, ensure_ascii=False, indent=2)
+                os.replace(tmp_name, target)
+            except BaseException:
+                Path(tmp_name).unlink(missing_ok=True)
+                raise
+            _upsert_manifest_entry(target, clean_state, source_key)
+            imported.append(source_key)
+    return {"imported": len(imported), "source_keys": imported}
 
 
 def list_incomplete_checkpoints() -> list[dict]:

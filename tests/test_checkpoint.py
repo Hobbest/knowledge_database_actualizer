@@ -3,6 +3,8 @@ from __future__ import annotations
 from app.checkpoint import (
     SuggestionCheckpoint,
     checkpoint_matches_source,
+    export_checkpoints,
+    import_checkpoints,
     list_incomplete_checkpoints,
     load_checkpoint_by_key,
     load_checkpoint_for_source,
@@ -104,6 +106,27 @@ def test_per_source_checkpoints_do_not_overwrite_each_other(tmp_data_dir):
     assert len(incomplete) == 2
     assert load_checkpoint_by_key("source-a.md") is not None
     assert load_latest_checkpoint() is not None
+
+
+def test_checkpoint_bundle_round_trip(tmp_data_dir):
+    checkpoint = SuggestionCheckpoint.for_source("text", "portable.md")
+    checkpoint.start(
+        {
+            "title": "Portable",
+            "source_type": "text",
+            "source_ref": "portable.md",
+            "source_key": "text:portable.md",
+        }
+    )
+    checkpoint.add({"note_path": "portable.md", "content": "saved"})
+    bundle = export_checkpoints("text:portable.md")
+    assert bundle["version"] == 1
+    assert len(bundle["checkpoints"]) == 1
+
+    result = import_checkpoints(bundle)
+    assert result["imported"] == 1
+    restored = load_checkpoint_by_key("text:portable.md")
+    assert restored and restored["suggestions"][0]["content"] == "saved"
 
 
 def test_upload_checkpoint_identity_uses_content_and_filename(tmp_data_dir):

@@ -8,8 +8,9 @@ import threading
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from queue import Full, Queue
+from time import perf_counter
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -17,6 +18,8 @@ from pydantic import BaseModel, Field
 from app.checkpoint import (
     SuggestionCheckpoint,
     checkpoint_matches_source,
+    export_checkpoints,
+    import_checkpoints,
     list_incomplete_checkpoints,
     load_checkpoint_for_source,
     load_latest_checkpoint,
@@ -37,8 +40,10 @@ from app.novelty import (
     novelty_from_checkpoint,
     prepare_planning_segments,
 )
+from app.observability import configure_logging, metrics
 from app.obsidian_uri import obsidian_open_uri, obsidian_uri_available
 from app.runtime import ANALYZE_POOL, INDEX_LOCK, WORKER_POOL
+from app.settings_persistence import update_env_values
 from app.sources import SourceDispatcher
 from app.suggest import (
     NoteSuggestion,
@@ -83,6 +88,26 @@ def _host_allowed(host_header: str) -> bool:
     else:
         host = host.split(":", 1)[0]
     return host in settings.allowed_host_set
+
+
+@app.middleware("http")
+async def request_observability(request: Request, call_next):
+    started = perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        duration_ms = (perf_counter() - started) * 1000
+        metrics.record_request(duration_ms, error=status_code >= 400)
+        logger.info(
+            "request method=%s path=%s status=%d duration_ms=%.1f",
+            request.method,
+            request.url.path,
+            status_code,
+            duration_ms,
+        )
 
 
 @app.middleware("http")
@@ -159,6 +184,12 @@ class VaultIndexRequest(BaseModel):
 
 class VaultWatchRequest(BaseModel):
     enabled: bool
+
+
+class ThresholdUpdateRequest(BaseModel):
+    novel: float = Field(ge=0.0, le=1.0)
+    known: float = Field(ge=0.0, le=1.0)
+    persist: bool = True
 
 
 class AnalyzeUrlRequest(BaseModel):
@@ -275,6 +306,7 @@ def _run_full_index(vault_path: Path) -> dict:
 
 @app.on_event("startup")
 def startup_vault_watch() -> None:
+    configure_logging(settings.log_level, settings.log_format)
     vault_watch.configure(_run_full_index)
     vault_watch.start()
 
@@ -322,7 +354,12 @@ def _iter_analyze_events(
     vault_path: Path | None = None,
 ) -> Iterator[dict]:
     """Synchronous analyze pipeline (runs in a worker thread)."""
+    started = perf_counter()
     checkpoint: SuggestionCheckpoint | None = None
+    analyze_failed = True
+    drafted_count = 0
+    llm_calls = 0
+    cache_hits = 0
     try:
         yield {
             "type": "progress",
@@ -374,6 +411,7 @@ def _iter_analyze_events(
                     )
                 ):
                 resume_suggestions = saved.get("suggestions") or []
+                cache_hits += len(resume_suggestions)
                 yield {
                     "type": "progress",
                     "stage": "loading",
@@ -442,6 +480,7 @@ def _iter_analyze_events(
             and saved.get("plan_fingerprint") == analysis_fingerprint(source)
         )
         if reusable_analysis:
+            cache_hits += 1
             assert saved is not None
             planning_segments = prepare_planning_segments(source)
             precomputed_topics = topics_from_checkpoint(
@@ -491,6 +530,7 @@ def _iter_analyze_events(
             if event.get("type") == "suggestions":
                 suggestions = event["suggestions"]
                 warnings = event.get("warnings", [])
+                llm_calls = int((event.get("llm_budget") or {}).get("calls", 0))
             else:
                 yield event
 
@@ -518,6 +558,8 @@ def _iter_analyze_events(
                     highlight_nodes=sorted(set(related_paths))
                 )
 
+        drafted_count = len(suggestions)
+        analyze_failed = False
         yield {
             "type": "result",
             "source": {
@@ -544,6 +586,23 @@ def _iter_analyze_events(
             "message": str(exc),
             "partial_suggestions": partial,
         }
+    finally:
+        duration_ms = (perf_counter() - started) * 1000
+        metrics.record_analyze(
+            duration_ms,
+            error=analyze_failed,
+            notes_drafted=drafted_count,
+            llm_calls=llm_calls,
+            cache_hits=cache_hits,
+        )
+        logger.info(
+            "analyze completed error=%s notes=%d llm_calls=%d cache_hits=%d duration_ms=%.1f",
+            analyze_failed,
+            drafted_count,
+            llm_calls,
+            cache_hits,
+            duration_ms,
+        )
 
 
 def _put_unless_cancelled(queue: Queue, item, cancelled: threading.Event) -> bool:
@@ -684,6 +743,14 @@ def get_status():
         "llm_draft_batch_size": settings.llm_draft_batch_size,
         "multi_vault_index_enabled": settings.multi_vault_index_enabled,
         "append_under_overlap_heading": settings.append_under_overlap_heading,
+        "intelligence": {
+            "draft_rag_enabled": settings.draft_rag_enabled,
+            "draft_rag_top_k": settings.draft_rag_top_k,
+            "duplicate_detection_enabled": settings.duplicate_detection_enabled,
+            "duplicate_similarity_threshold": settings.duplicate_similarity_threshold,
+            "note_quality_scoring_enabled": settings.note_quality_scoring_enabled,
+        },
+        "metrics": metrics.snapshot(),
     }
 
 
@@ -761,6 +828,47 @@ def get_vault_note(note_path: str, vault_path: str | None = None):
     }
 
 
+@app.get("/api/vault/search")
+def search_vault(
+    q: str = Query(min_length=1, max_length=500),
+    mode: str = Query(default="semantic", pattern="^(semantic|keyword)$"),
+    top_k: int = Query(default=10, ge=1, le=50),
+    vault_path: str | None = None,
+):
+    """Search indexed vault chunks by meaning or literal terms."""
+    query = q.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Search query is required")
+    vault = _resolve_vault_path(vault_path)
+    store = get_vector_store(vault)
+    if store.chunk_count() == 0:
+        raise HTTPException(status_code=400, detail="Index is empty — index the vault first.")
+    try:
+        matches = (
+            store.search_keyword(query, top_k=top_k)
+            if mode == "keyword"
+            else store.query_similar(query, top_k=top_k)
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Vault search failed: {exc}") from exc
+    return {
+        "query": query,
+        "mode": mode,
+        "results": [
+            {
+                "note_path": match.note_path,
+                "note_title": match.note_title,
+                "heading": match.heading,
+                "snippet": match.text[: TEXT_LIMITS.api_chunk_preview_chars],
+                "score": round(match.similarity, 3),
+                "tags": match.tags,
+                "obsidian_uri": obsidian_open_uri(match.note_path),
+            }
+            for match in matches
+        ],
+    }
+
+
 @app.get("/api/vault/thresholds/calibrate")
 def calibrate_vault_thresholds():
     """Suggest NOVEL/KNOWN thresholds from indexed vault chunk similarities."""
@@ -770,6 +878,34 @@ def calibrate_vault_thresholds():
             raise HTTPException(status_code=400, detail="Index is empty — index the vault first.")
         calibration = calibrate_thresholds(store)
     return calibration.to_dict()
+
+
+@app.post("/api/vault/thresholds")
+def update_vault_thresholds(request: ThresholdUpdateRequest):
+    """Apply validated novelty thresholds and optionally persist them to .env."""
+    if request.novel >= request.known:
+        raise HTTPException(
+            status_code=400,
+            detail="Novel threshold must be lower than known threshold.",
+        )
+    if request.persist:
+        try:
+            update_env_values(
+                FRONTEND_DIR.parent / ".env",
+                {
+                    "NOVEL_THRESHOLD": str(request.novel),
+                    "KNOWN_THRESHOLD": str(request.known),
+                },
+            )
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Could not update .env: {exc}") from exc
+    settings.novel_threshold = request.novel
+    settings.known_threshold = request.known
+    return {
+        "novel": settings.novel_threshold,
+        "known": settings.known_threshold,
+        "persisted": request.persist,
+    }
 
 
 @app.get("/api/vault/graph")
@@ -831,6 +967,29 @@ def get_suggestions_checkpoint(source_key: str | None = None):
     if not data:
         return {"exists": False}
     return {"exists": True, **data}
+
+
+@app.get("/api/suggestions/checkpoint/export")
+def export_suggestion_checkpoints(source_key: str | None = None):
+    """Download one checkpoint or a bundle of all checkpoint history."""
+    payload = export_checkpoints(source_key)
+    if source_key and not payload["checkpoints"]:
+        raise HTTPException(status_code=404, detail="Checkpoint not found")
+    return JSONResponse(
+        content=payload,
+        headers={
+            "Content-Disposition": 'attachment; filename="actualizer-checkpoints.json"'
+        },
+    )
+
+
+@app.post("/api/suggestions/checkpoint/import")
+def import_suggestion_checkpoints(payload: dict):
+    """Import a validated checkpoint bundle."""
+    try:
+        return import_checkpoints(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/vault/refresh-notes")

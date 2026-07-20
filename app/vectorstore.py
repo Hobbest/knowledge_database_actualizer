@@ -441,6 +441,47 @@ class VectorStore:
             batch.append(similar)
         return batch
 
+    def search_keyword(self, query: str, *, top_k: int = 10) -> list[SimilarChunk]:
+        """Search indexed chunk text and metadata without embedding the query."""
+        terms = [term.casefold() for term in query.split() if term.strip()]
+        if not terms:
+            return []
+        with INDEX_LOCK:
+            result = self._collection.get(include=["documents", "metadatas"])
+
+        matches: list[SimilarChunk] = []
+        for chunk_id, doc, meta in zip(
+            result.get("ids") or [],
+            result.get("documents") or [],
+            result.get("metadatas") or [],
+            strict=False,
+        ):
+            text = str(doc or "")
+            metadata = meta or {}
+            title = str(metadata.get("note_title", ""))
+            heading = str(metadata.get("heading", ""))
+            haystack = f"{title}\n{heading}\n{text}".casefold()
+            counts = [haystack.count(term) for term in terms]
+            if not all(counts):
+                continue
+            # Rank exact/title matches above repeated body matches.
+            title_bonus = sum(2 for term in terms if term in title.casefold())
+            heading_bonus = sum(1 for term in terms if term in heading.casefold())
+            score = float(sum(counts) + title_bonus + heading_bonus)
+            matches.append(
+                SimilarChunk(
+                    chunk_id=str(chunk_id),
+                    note_path=str(metadata.get("note_path", "")),
+                    note_title=title,
+                    text=text,
+                    similarity=score,
+                    heading=heading or None,
+                    tags=_parse_tags_metadata(metadata.get("tags")),
+                )
+            )
+        matches.sort(key=lambda item: (-item.similarity, item.note_path, item.chunk_id))
+        return matches[: max(1, top_k)]
+
     def sample_chunks(self, *, limit: int = 200) -> list[SampledChunk]:
         """Return a random subset of indexed chunks for threshold calibration."""
         with INDEX_LOCK:

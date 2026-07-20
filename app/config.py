@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     # any existing directory is accepted (local first-run / tests).
     allowed_vault_roots: str = ""
     data_dir: Path = Path("./data")
+    log_level: str = "INFO"
+    log_format: str = "plain"  # plain | json
 
     # Embeddings: provider for similarity search (separate from LLM note drafting).
     # Defaults match .env.example — override via .env for Gemini or other models.
@@ -109,6 +111,17 @@ class Settings(BaseSettings):
     # Maximum sibling wikilinks added to each note when linking is enabled.
     sibling_link_count: int = 3
 
+    # Intelligence & automation (Phase 6)
+    # Inject short vault excerpts into LLM draft prompts for better cross-refs.
+    draft_rag_enabled: bool = True
+    draft_rag_top_k: int = 3
+    draft_rag_excerpt_chars: int = 400
+    # Flag near-duplicate proposed notes using embedding similarity.
+    duplicate_detection_enabled: bool = True
+    duplicate_similarity_threshold: float = 0.85
+    # Heuristic 0–1 quality score on drafted notes (structure / related links).
+    note_quality_scoring_enabled: bool = True
+
     # When > 0, inline bounded excerpts from ![[embedded]] notes into embeddings.
     transclude_depth: int = 0
     transclude_excerpt_chars: int = 400
@@ -199,6 +212,12 @@ class Settings(BaseSettings):
             raise ValueError("TAG_SIMILARITY_MAX_BOOST must be >= 0")
         if self.threshold_calibration_samples < 20:
             raise ValueError("THRESHOLD_CALIBRATION_SAMPLES must be >= 20")
+        self.log_level = self.log_level.strip().upper()
+        if self.log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ValueError("LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, or CRITICAL")
+        self.log_format = self.log_format.strip().lower()
+        if self.log_format not in {"plain", "json"}:
+            raise ValueError("LOG_FORMAT must be 'plain' or 'json'")
         if self.transclude_depth < 0:
             raise ValueError("TRANSCLUDE_DEPTH must be >= 0 (0 = disabled)")
         if self.transclude_excerpt_chars < 1:
@@ -209,6 +228,12 @@ class Settings(BaseSettings):
             raise ValueError("VAULT_WATCH_DEBOUNCE_SECONDS must be > 0")
         if self.llm_draft_batch_size < 1:
             raise ValueError("LLM_DRAFT_BATCH_SIZE must be >= 1")
+        if self.draft_rag_top_k < 1:
+            raise ValueError("DRAFT_RAG_TOP_K must be >= 1")
+        if self.draft_rag_excerpt_chars < 80:
+            raise ValueError("DRAFT_RAG_EXCERPT_CHARS must be >= 80")
+        if not (0.0 < self.duplicate_similarity_threshold <= 1.0):
+            raise ValueError("DUPLICATE_SIMILARITY_THRESHOLD must be in (0, 1]")
         if self.llm_provider is not None:
             self.llm_provider = self.llm_provider.strip() or None
         if self.llm_model is not None:

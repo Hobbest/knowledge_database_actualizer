@@ -26,6 +26,7 @@ class KnowledgeGraph:
                 label=note.title,
                 title=note.title,
                 aliases=list(note.aliases),
+                tags=list(note.tags),
             )
 
         for note in vault_result.notes:
@@ -60,6 +61,7 @@ class KnowledgeGraph:
                 label=note.title,
                 title=note.title,
                 aliases=list(note.aliases),
+                tags=list(note.tags),
             )
 
         # Rebuild the full link index from current graph nodes + new notes so
@@ -101,6 +103,7 @@ class KnowledgeGraph:
                     "id": node_id,
                     "label": data.get("label", node_id),
                     "highlighted": node_id in highlight,
+                    "tags": list(data.get("tags") or []),
                 }
             )
 

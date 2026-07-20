@@ -4,7 +4,9 @@ const assert = require("node:assert/strict");
 const {
   buildAnalyzeFormData,
   buildPreviewPayload,
+  buildSearchResultHtml,
   createNdjsonParser,
+  lineDiff,
   markdownToSafeHtml,
   readNdjsonResponse,
   sourceInputState,
@@ -81,6 +83,34 @@ test("preview payload matches canonical preview API contract", () => {
       append_heading: "Evidence",
     }
   );
+  assert.equal(
+    buildPreviewPayload(
+      { note_path: "topics/new.md", content: "New", write_mode: "write" },
+      "/vault"
+    ).overwrite,
+    true
+  );
+});
+
+test("search result rendering escapes index content and allows Obsidian links", () => {
+  const rendered = buildSearchResultHtml({
+    note_title: "<script>bad</script>",
+    note_path: "topics/safe.md",
+    snippet: "<img src=x>",
+    score: 0.812,
+    obsidian_uri: "obsidian://open?vault=Notes&file=topics%2Fsafe.md",
+  });
+  assert.doesNotMatch(rendered, /<script>|<img/);
+  assert.match(rendered, /&lt;script&gt;/);
+  assert.match(rendered, /obsidian:\/\/open/);
+});
+
+test("line diff identifies unchanged, removed, and added lines", () => {
+  assert.deepEqual(lineDiff("same\nold", "same\nnew"), [
+    { type: "same", line: "same" },
+    { type: "remove", line: "old" },
+    { type: "add", line: "new" },
+  ]);
 });
 
 test("analyze form includes request vault and analyze-in-place path", () => {
