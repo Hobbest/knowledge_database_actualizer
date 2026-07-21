@@ -1,0 +1,2 @@
+# Optional remote or in-memory Qdrant vector store.
+qdrant-client==1.15.1

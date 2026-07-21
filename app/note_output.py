@@ -14,7 +14,7 @@ from app.obsidian_templates import discover_obsidian_template, expand_template_p
 from app.sources.base import LoadedSource, SourceLocation
 from app.text_utils import combine_segment_text
 from app.vault import parse_note_text
-from app.vectorstore import VectorStore
+from app.vector_protocol import VectorStoreProtocol as VectorStore
 
 logger = logging.getLogger(__name__)
 

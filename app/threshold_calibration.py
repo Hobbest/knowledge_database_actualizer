@@ -7,7 +7,8 @@ from dataclasses import dataclass
 
 from app.config import settings
 from app.thresholds import recommended_thresholds_for
-from app.vectorstore import SampledChunk, VectorStore
+from app.vector_protocol import VectorStoreProtocol as VectorStore
+from app.vectorstore import SampledChunk
 
 
 @dataclass

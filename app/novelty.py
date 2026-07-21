@@ -13,7 +13,8 @@ from app.segmentation import split_large_segments
 from app.similarity import classification_similarity
 from app.sources.base import LoadedSource, SourceSegment
 from app.text_limits import TEXT_LIMITS
-from app.vectorstore import SimilarChunk, VectorStore
+from app.vector_protocol import VectorStoreProtocol as VectorStore
+from app.vectorstore import SimilarChunk
 
 if TYPE_CHECKING:
     from app.atomic_notes import SegmentNovelty
@@ -182,8 +183,8 @@ def _score_segments_via_chunks(
             if on_batch is not None:
                 on_batch(total_chunks, total_chunks, rate_limited=True)
             break
-        for offset, matches in enumerate(batch_matches):
-            matches_per_chunk[start + offset] = matches
+        for offset, batch_item in enumerate(batch_matches):
+            matches_per_chunk[start + offset] = batch_item
         if on_batch is not None:
             on_batch(min(start + len(batch_texts), total_chunks), total_chunks, rate_limited=False)
 

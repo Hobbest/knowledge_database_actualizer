@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 
 from app.config import settings
-from app.vectorstore import VectorStore
+from app.vector_protocol import VectorStoreProtocol as VectorStore
 
 
 @dataclass(frozen=True)

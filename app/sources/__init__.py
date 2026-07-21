@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.plugin_api import discover_source_loaders
 from app.source_identity import upload_source_key
+from app.sources.audio import AudioVideoLoader
 from app.sources.base import LoadedSource
 from app.sources.docx import DocxLoader
 from app.sources.epub import EpubLoader
@@ -15,21 +17,36 @@ from app.url_security import validate_public_url
 
 class SourceDispatcher:
     def __init__(self):
-        self.path_loaders = [TextLoader(), PdfLoader(), EpubLoader(), DocxLoader()]
+        plugin_loaders = []
+        for plugin in discover_source_loaders().values():
+            try:
+                plugin_loaders.append(plugin() if isinstance(plugin, type) else plugin)
+            except Exception:
+                continue
+        self.path_loaders = [
+            *plugin_loaders,
+            TextLoader(),
+            AudioVideoLoader(),
+            PdfLoader(),
+            EpubLoader(),
+            DocxLoader(),
+        ]
         # Order matters: YouTube first, then the generic web-article fallback.
-        self.url_loaders = [YouTubeLoader(), WebArticleLoader()]
+        self.url_loaders = [*plugin_loaders, YouTubeLoader(), WebArticleLoader()]
 
     def load_from_path(self, path: Path) -> LoadedSource:
         path = path.resolve()
         for loader in self.path_loaders:
-            if loader.supports_path(path):
+            supports = getattr(loader, "supports_path", None)
+            if supports is not None and supports(path):
                 return loader.load_from_path(path)
         raise ValueError(f"Unsupported file type: {path.suffix}")
 
     def load_from_url(self, url: str) -> LoadedSource:
         url = validate_public_url(url)
         for loader in self.url_loaders:
-            if loader.supports_url(url):
+            supports = getattr(loader, "supports_url", None)
+            if supports is not None and supports(url):
                 return loader.load_from_url(url)
         raise ValueError(f"Unsupported URL: {url}")
 

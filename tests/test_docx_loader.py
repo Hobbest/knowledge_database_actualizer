@@ -39,3 +39,18 @@ def test_docx_loader_rejects_empty_document(monkeypatch: pytest.MonkeyPatch, tmp
 
     with pytest.raises(ValueError, match="No extractable text"):
         DocxLoader().load_from_path(path)
+
+
+def test_docx_loader_propagates_clean_corrupt_archive_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    path = tmp_path / "corrupt.docx"
+    path.write_bytes(b"not a zip archive")
+
+    def reject_corrupt_document(_handle):
+        raise ValueError("Invalid DOCX archive")
+
+    monkeypatch.setattr("mammoth.convert_to_markdown", reject_corrupt_document)
+
+    with pytest.raises(ValueError, match="Invalid DOCX archive"):
+        DocxLoader().load_from_path(path)

@@ -27,12 +27,26 @@
     :focus-visible { outline: 3px solid #818cf8; outline-offset: 2px; }
     dialog::backdrop { background: rgb(15 23 42 / 0.55); }
     .markdown-preview { overflow-wrap: anywhere; }
+    .drop-active { outline: 3px dashed #4f46e5; outline-offset: 3px; }
+    html.dark body { background: #0f172a; color: #e2e8f0; }
+    html.dark .bg-white { background-color: #1e293b !important; }
+    html.dark .bg-slate-50 { background-color: #0f172a !important; }
+    html.dark .bg-slate-100, html.dark .bg-slate-200 { background-color: #334155 !important; }
+    html.dark .text-slate-900, html.dark .text-slate-800, html.dark .text-slate-700 { color: #e2e8f0 !important; }
+    html.dark .text-slate-600, html.dark .text-slate-500, html.dark .text-slate-400 { color: #94a3b8 !important; }
+    html.dark .border, html.dark [class*="border-"] { border-color: #475569 !important; }
+    html.dark input, html.dark textarea, html.dark select, html.dark dialog {
+      background-color: #1e293b !important; color: #e2e8f0 !important;
+    }
   </style>
 </head>
 <body class="bg-slate-50 text-slate-900">
   <div class="max-w-6xl mx-auto p-6 space-y-6">
     <header class="space-y-2">
-      <h1 class="text-3xl font-bold">Knowledge Database Actualizer</h1>
+      <div class="flex items-center justify-between gap-3">
+        <h1 class="text-3xl font-bold">Knowledge Database Actualizer</h1>
+        <button id="themeToggle" class="border px-3 py-1.5 rounded-lg text-sm">Dark mode</button>
+      </div>
       <p class="text-slate-600">
         Judge whether a source adds new information to your Obsidian vault, then review atomic note drafts.
       </p>
@@ -58,6 +72,10 @@
           Index on save
         </label>
       </div>
+      <label id="vaultSwitcherWrap" class="hidden text-sm">
+        Indexed vault
+        <select id="vaultSwitcher" class="ml-2 border rounded-lg px-2 py-1 bg-white"></select>
+      </label>
       <div id="statusBox" class="text-sm text-slate-600" role="status" aria-live="polite">Loading status...</div>
       <div id="thresholdPanel" class="rounded-lg border bg-slate-50 p-3 text-sm space-y-2">
         <div class="font-medium">Vault similarity thresholds</div>
@@ -85,7 +103,41 @@
       <ul id="vaultSearchResults" class="space-y-2"></ul>
     </section>
 
-    <section class="bg-white rounded-xl shadow-sm border p-5 space-y-4">
+    <section class="bg-white rounded-xl shadow-sm border p-5 space-y-3">
+      <h2 class="text-xl font-semibold">Ask vault</h2>
+      <form id="vaultChatForm" class="flex flex-col md:flex-row gap-3">
+        <input id="vaultChatQuestion" maxlength="2000" placeholder="Ask a question grounded in your indexed notes…" class="flex-1 border rounded-lg px-3 py-2" />
+        <button id="vaultChatBtn" type="submit" class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-500">Ask</button>
+      </form>
+      <div id="vaultChatMessage" class="text-sm text-slate-500" role="status" aria-live="polite"></div>
+      <div id="vaultChatAnswer" class="hidden rounded-lg border bg-slate-50 p-4 text-sm whitespace-pre-wrap"></div>
+      <ul id="vaultChatCitations" class="space-y-1 text-xs text-slate-600"></ul>
+    </section>
+
+    <section class="bg-white rounded-xl shadow-sm border p-5 space-y-3">
+      <div class="flex items-center justify-between">
+        <h2 class="text-xl font-semibold">Activity</h2>
+        <button id="refreshAnalyticsBtn" class="border px-3 py-1 rounded-lg text-sm">Refresh</button>
+      </div>
+      <div id="analyticsTotals" class="grid grid-cols-2 gap-3 text-sm"></div>
+      <div id="analyticsBars" class="space-y-2" aria-label="Daily activity chart"></div>
+    </section>
+
+    <details id="debugPanel" class="bg-white rounded-xl shadow-sm border p-5">
+      <summary class="font-semibold cursor-pointer">Debug / index health</summary>
+      <div class="mt-3 space-y-3 text-sm">
+        <div id="debugSummary" class="grid md:grid-cols-3 gap-3"></div>
+        <div>
+          <div class="flex items-center justify-between">
+            <h3 class="font-medium">Recent server logs</h3>
+            <button id="refreshDebugBtn" class="border px-2 py-1 rounded">Refresh</button>
+          </div>
+          <pre id="recentLogs" class="mt-2 max-h-64 overflow-auto border rounded p-3 bg-slate-50 whitespace-pre-wrap">Open this panel to load logs.</pre>
+        </div>
+      </div>
+    </details>
+
+    <section id="analyzeDropZone" class="bg-white rounded-xl shadow-sm border p-5 space-y-4">
       <h2 class="text-xl font-semibold">Analyze source</h2>
       <details class="text-sm text-slate-600 rounded-lg bg-slate-50 border px-3 py-2">
         <summary class="font-medium cursor-pointer text-slate-700">Which source should I use?</summary>
@@ -106,18 +158,18 @@
           />
         </div>
         <div class="space-y-2">
-          <label for="sourceFile" class="text-sm font-medium">Or upload file (txt, md, pdf, epub, docx)</label>
+          <label for="sourceFile" class="text-sm font-medium">Or upload document, audio, or video</label>
           <input
             id="sourceFile"
             type="file"
-            accept=".txt,.md,.markdown,.pdf,.epub,.docx"
+            accept=".txt,.md,.markdown,.pdf,.epub,.docx,.mp3,.wav,.m4a,.flac,.ogg,.mp4,.webm"
             class="w-full border rounded-lg px-3 py-2"
             aria-describedby="sourceInputHelp analyzeError"
           />
         </div>
       </div>
       <p id="sourceInputHelp" class="text-xs text-slate-500">
-        Supported uploads: TXT, Markdown, PDF, EPUB, and DOCX. Selecting one source disables the other input.
+        Supported uploads: TXT, Markdown, PDF, EPUB, DOCX, MP3, WAV, M4A, FLAC, OGG, MP4, and WebM.
       </p>
       <div class="space-y-2">
         <label for="vaultNotePath" class="text-sm font-medium">
@@ -156,6 +208,12 @@
       <div id="analyzeError" class="text-red-600 text-sm hidden" role="alert" aria-live="assertive" tabindex="-1"></div>
 
       <div id="analyzeProgress" class="hidden space-y-2" role="progressbar" aria-label="Analysis progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div id="progressStages" class="grid grid-cols-4 gap-2 text-xs text-slate-500" aria-hidden="true">
+          <span data-stage="loading">Load</span>
+          <span data-stage="novelty">Compare</span>
+          <span data-stage="scoring">Plan</span>
+          <span data-stage="drafting">Draft</span>
+        </div>
         <div class="flex items-center justify-between text-sm">
           <span id="progressLabel" class="text-slate-600">Working...</span>
           <span id="progressCount" class="text-slate-400 tabular-nums"></span>
@@ -174,7 +232,11 @@
       <div class="bg-white rounded-xl shadow-sm border p-5 space-y-3">
         <div class="flex items-center justify-between gap-3">
           <h2 id="resultsHeading" class="text-xl font-semibold">Verdict</h2>
-          <span id="verdictBadge" class="px-3 py-1 rounded-full text-sm font-medium"></span>
+          <div class="flex items-center gap-2">
+            <button id="exportReportMd" class="border rounded px-2 py-1 text-sm">Report .md</button>
+            <button id="exportReportHtml" class="border rounded px-2 py-1 text-sm">Report .html</button>
+            <span id="verdictBadge" class="px-3 py-1 rounded-full text-sm font-medium"></span>
+          </div>
         </div>
         <div class="grid md:grid-cols-3 gap-3 text-sm">
           <div class="p-3 bg-slate-50 rounded-lg">

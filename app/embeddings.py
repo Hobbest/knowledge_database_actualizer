@@ -101,10 +101,64 @@ class LocalEmbeddingBackend(EmbeddingBackend):
                 "For embeddings, use EMBEDDING_PROVIDER=gemini with EMBEDDING_MODEL=gemini-embedding-001, "
                 "or keep EMBEDDING_PROVIDER=local with a sentence-transformers model like all-MiniLM-L6-v2."
             )
-        from sentence_transformers import SentenceTransformer
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            raise RuntimeError(
+                "Local embeddings require sentence-transformers. "
+                "Install the project's base requirements."
+            ) from exc
 
         self.model_name = model_name
-        self._model = SentenceTransformer(model_name)
+        device = str(getattr(settings, "embedding_device", "auto") or "auto").lower()
+        backend = str(
+            getattr(settings, "embedding_backend", "sentence_transformers")
+            or "sentence_transformers"
+        ).lower()
+        if device not in {"auto", "cpu", "cuda", "mps"}:
+            raise ValueError(
+                f"Unsupported EMBEDDING_DEVICE '{device}'. Use auto, cpu, cuda, or mps."
+            )
+        if backend not in {"sentence_transformers", "onnx"}:
+            raise ValueError(
+                f"Unsupported EMBEDDING_BACKEND '{backend}'. "
+                "Use sentence_transformers or onnx."
+            )
+
+        model_options: dict[str, str] = {}
+        # Omitting device delegates "auto" selection to sentence-transformers,
+        # which handles CUDA, MPS, and CPU availability in one place.
+        if device != "auto":
+            model_options["device"] = device
+        if backend == "onnx":
+            model_options["backend"] = "onnx"
+
+        try:
+            self._model = SentenceTransformer(model_name, **model_options)
+        except (ImportError, ModuleNotFoundError) as exc:
+            if backend == "onnx":
+                raise RuntimeError(
+                    "ONNX embeddings require sentence-transformers with ONNX support, "
+                    "optimum[onnxruntime], and onnxruntime. Install "
+                    "requirements-performance.txt."
+                ) from exc
+            raise
+        except TypeError as exc:
+            if backend == "onnx" and "backend" in str(exc):
+                raise RuntimeError(
+                    "The installed sentence-transformers version does not support "
+                    "backend='onnx'. Upgrade it and install requirements-performance.txt."
+                ) from exc
+            raise
+
+        self.device = device
+        self.backend = backend
+        self.quantized = bool(getattr(settings, "embedding_quantized", False))
+        if self.quantized and backend != "onnx":
+            logger.warning(
+                "EMBEDDING_QUANTIZED is only applicable to the ONNX backend; "
+                "using regular sentence-transformers inference."
+            )
 
         # Authoritative capacity check for models missing from the known table:
         # sentence-transformers exposes the real token window after loading.

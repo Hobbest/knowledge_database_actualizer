@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     embedding_provider: str = "local"  # local | gemini
     embedding_model: str = "all-MiniLM-L6-v2"  # local: HF model; gemini: e.g. gemini-embedding-001
     embedding_api_key: str | None = None  # optional; falls back to llm_api_key for gemini
+    embedding_device: str = "auto"  # auto | cpu | cuda | mps
+    embedding_backend: str = "sentence_transformers"  # sentence_transformers | onnx
+    embedding_quantized: bool = False
+    vector_backend: str = "chroma"  # chroma | qdrant
+    qdrant_url: str | None = "http://127.0.0.1:6333"
+    qdrant_api_key: str | None = None
+    qdrant_collection: str = "actualizer_vault_chunks"
+    qdrant_vector_size: int = 384
 
     novel_threshold: float = 0.55
     known_threshold: float = 0.75
@@ -63,6 +71,12 @@ class Settings(BaseSettings):
     # order). When none match, the loader falls back to the first available
     # transcript language.
     youtube_transcript_languages: str = "en,en-US,en-GB"
+    # Optional faster-whisper settings for uploaded audio/video.
+    whisper_model: str = "small"
+    whisper_device: str = "auto"
+    whisper_compute_type: str = "default"
+    whisper_language: str | None = None
+    whisper_beam_size: int = 5
 
     # Skip non-substantive sections (acknowledgements, tables of contents,
     # reference lists, chapter summaries, contact/copyright pages) when planning.
@@ -71,9 +85,22 @@ class Settings(BaseSettings):
     # Detect tables (real PDF tables via pdfplumber + markdown pipe tables) and
     # figure captions, and attach the ones on a note's page/lines to that note.
     include_media: bool = True
+    # Best-effort descriptions for image bytes made available by source loaders.
+    vision_media_enabled: bool = False
+    vision_model: str | None = None
+    # Optional scanned-PDF OCR (install requirements-ocr.txt first).
+    pdf_ocr_enabled: bool = False
+    pdf_ocr_language: str = "eng"
+    pdf_ocr_dpi: int = 200
 
     # Comma-separated tags added to every drafted note (Obsidian frontmatter).
     default_note_tags: str = "source-import"
+    auto_tagging_enabled: bool = True
+    auto_tagging_top_k: int = 3
+    auto_tagging_max_tags: int = 8
+
+    # Optional bundled prompt specialization: research | programming | history.
+    prompt_domain: str = ""
 
     # Vault-relative folder for new notes (e.g. sources → sources/<source>/<concept>.md).
     note_output_folder: str = "sources"
@@ -145,6 +172,9 @@ class Settings(BaseSettings):
     multi_vault_index_enabled: bool = False
     # When appending to an overlapping note, insert under the matched chunk heading.
     append_under_overlap_heading: bool = True
+    # Commit only notes written by an apply request when the vault is a Git repo.
+    git_auto_commit_on_apply: bool = False
+    git_commit_message: str = "Actualize notes from {source}"
 
     # Optional cloud LLM for drafting. Leave unset to use extractive fallback.
     # Configure via .env — never commit API keys.
@@ -194,8 +224,25 @@ class Settings(BaseSettings):
             )
         if self.embedding_query_batch_size < 1:
             raise ValueError("EMBEDDING_QUERY_BATCH_SIZE must be >= 1")
+        self.embedding_device = self.embedding_device.strip().lower()
+        if self.embedding_device not in {"auto", "cpu", "cuda", "mps"}:
+            raise ValueError("EMBEDDING_DEVICE must be auto, cpu, cuda, or mps")
+        self.embedding_backend = self.embedding_backend.strip().lower()
+        if self.embedding_backend not in {"sentence_transformers", "onnx"}:
+            raise ValueError(
+                "EMBEDDING_BACKEND must be 'sentence_transformers' or 'onnx'"
+            )
         if self.chroma_index_batch_size < 1:
             raise ValueError("CHROMA_INDEX_BATCH_SIZE must be >= 1")
+        self.vector_backend = self.vector_backend.strip().lower()
+        if self.vector_backend not in {"chroma", "qdrant"}:
+            raise ValueError("VECTOR_BACKEND must be 'chroma' or 'qdrant'")
+        if self.qdrant_vector_size < 1:
+            raise ValueError("QDRANT_VECTOR_SIZE must be >= 1")
+        if not self.qdrant_collection.strip():
+            raise ValueError("QDRANT_COLLECTION must not be empty")
+        if not self.git_commit_message.strip():
+            raise ValueError("GIT_COMMIT_MESSAGE must not be empty")
         if self.llm_max_calls_per_run < 0:
             raise ValueError("LLM_MAX_CALLS_PER_RUN must be >= 0 (0 = unlimited)")
         if self.llm_max_input_chars_per_run < 0:
@@ -204,6 +251,12 @@ class Settings(BaseSettings):
             raise ValueError("MAX_UPLOAD_MB must be >= 0 (0 = unlimited)")
         if self.max_fetch_mb < 0:
             raise ValueError("MAX_FETCH_MB must be >= 0 (0 = unlimited)")
+        if self.whisper_beam_size < 1:
+            raise ValueError("WHISPER_BEAM_SIZE must be >= 1")
+        if self.auto_tagging_top_k < 1 or self.auto_tagging_max_tags < 1:
+            raise ValueError("AUTO_TAGGING_TOP_K and AUTO_TAGGING_MAX_TAGS must be >= 1")
+        if self.pdf_ocr_dpi < 72:
+            raise ValueError("PDF_OCR_DPI must be >= 72")
         if self.moc_min_notes < 2:
             raise ValueError("MOC_MIN_NOTES must be >= 2")
         if self.tag_similarity_boost_per_tag < 0:
@@ -240,6 +293,15 @@ class Settings(BaseSettings):
             self.llm_model = self.llm_model.strip() or None
         if self.llm_api_key is not None:
             self.llm_api_key = self.llm_api_key.strip() or None
+        if self.qdrant_url is not None:
+            self.qdrant_url = self.qdrant_url.strip() or None
+        if self.qdrant_api_key is not None:
+            self.qdrant_api_key = self.qdrant_api_key.strip() or None
+        if self.vision_model is not None:
+            self.vision_model = self.vision_model.strip() or None
+        if self.whisper_language is not None:
+            self.whisper_language = self.whisper_language.strip() or None
+        self.prompt_domain = self.prompt_domain.strip().lower()
         return self
 
     @property

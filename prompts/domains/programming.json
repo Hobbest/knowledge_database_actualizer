@@ -1,0 +1,8 @@
+{
+  "name": "programming",
+  "rules": [
+    "Preserve API names, versions, commands, and code semantics exactly",
+    "Separate conceptual behavior from implementation-specific details",
+    "Include constraints and failure modes supported by the source"
+  ]
+}

@@ -11,10 +11,12 @@ from queue import Full, Queue
 from time import perf_counter
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from app.analytics import load_analytics, record_counts
+from app.chat import answer_vault_question
 from app.checkpoint import (
     SuggestionCheckpoint,
     checkpoint_matches_source,
@@ -25,7 +27,8 @@ from app.checkpoint import (
     load_latest_checkpoint,
 )
 from app.config import settings
-from app.embeddings import chunk_size_error
+from app.embeddings import chunk_size_error, embedding_collection_suffix
+from app.git_integration import commit_written_paths
 from app.graph import KnowledgeGraph
 from app.index_meta import (
     active_vault_path,
@@ -40,8 +43,10 @@ from app.novelty import (
     novelty_from_checkpoint,
     prepare_planning_segments,
 )
-from app.observability import configure_logging, metrics
+from app.observability import configure_logging, metrics, recent_logs
 from app.obsidian_uri import obsidian_open_uri, obsidian_uri_available
+from app.qdrant_store import QdrantVectorStore
+from app.reports import generate_html_report, generate_markdown_report
 from app.runtime import ANALYZE_POOL, INDEX_LOCK, WORKER_POOL
 from app.settings_persistence import update_env_values
 from app.sources import SourceDispatcher
@@ -57,7 +62,9 @@ from app.suggest import (
 from app.text_limits import TEXT_LIMITS
 from app.threshold_calibration import calibrate_thresholds
 from app.thresholds import recommended_thresholds_for, threshold_mismatch_warnings
+from app.vault_index import vault_collection_token
 from app.vault_watcher import vault_watch
+from app.vector_protocol import VectorStoreProtocol
 from app.vectorstore import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -154,15 +161,51 @@ async def api_token_auth(request: Request, call_next):
     return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
 
 
-vector_store = VectorStore()
-_vector_stores: dict[str, VectorStore] = {}
+def _create_vector_store(vault_path: Path | None = None) -> VectorStoreProtocol:
+    if settings.vector_backend == "qdrant":
+        token = vault_collection_token(vault_path) if settings.multi_vault_index_enabled else ""
+        collection = (
+            f"{settings.qdrant_collection}_{embedding_collection_suffix()}{token}"
+        )
+        return QdrantVectorStore(
+            collection_name=collection,
+            vector_size=settings.qdrant_vector_size,
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_api_key,
+        )
+    return VectorStore(vault_path=vault_path)
+
+
+vector_store = _create_vector_store()
+_vector_stores: dict[str, VectorStoreProtocol] = {}
 graph = KnowledgeGraph()
 source_dispatcher = SourceDispatcher()
 
 _STREAM_DONE = object()
 
 
-def get_vector_store(vault_path: Path | None = None) -> VectorStore:
+def _record_analytics(**counts: int) -> None:
+    """Keep local telemetry failures from breaking analysis or vault writes."""
+    try:
+        record_counts(**counts)
+    except OSError as exc:
+        logger.warning("Could not record local analytics: %s", exc)
+
+
+def _git_commit_for_paths(
+    vault_path: Path, paths: list[str], source_title: str | None
+) -> dict | None:
+    if not settings.git_auto_commit_on_apply or not paths:
+        return None
+    source = (source_title or "Actualizer").replace("\n", " ").strip()
+    try:
+        message = settings.git_commit_message.format(source=source)
+    except (KeyError, ValueError):
+        message = f"Actualize notes from {source}"
+    return commit_written_paths(vault_path, paths, message=message).to_dict()
+
+
+def get_vector_store(vault_path: Path | None = None) -> VectorStoreProtocol:
     """Return the vector store for a vault (supports optional multi-vault indexing)."""
     if not settings.multi_vault_index_enabled:
         return vector_store
@@ -172,7 +215,7 @@ def get_vector_store(vault_path: Path | None = None) -> VectorStore:
     key = str(resolved.resolve())
     store = _vector_stores.get(key)
     if store is None:
-        store = VectorStore(vault_path=resolved)
+        store = _create_vector_store(resolved)
         _vector_stores[key] = store
     return store
 
@@ -196,6 +239,12 @@ class AnalyzeUrlRequest(BaseModel):
     url: str
 
 
+class ChatRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+    vault_path: str | None = None
+    source_context: str | None = Field(default=None, max_length=20_000)
+
+
 class ApplySuggestionRequest(BaseModel):
     note_path: str
     content: str
@@ -203,11 +252,19 @@ class ApplySuggestionRequest(BaseModel):
     overwrite: bool = False
     vault_path: str | None = None
     append_heading: str | None = None
+    source_title: str | None = Field(default=None, max_length=300)
 
 
 class ApplySuggestionsBatchRequest(BaseModel):
     notes: list[ApplySuggestionRequest]
     vault_path: str | None = None
+    source_title: str | None = Field(default=None, max_length=300)
+
+
+class ReportExportRequest(BaseModel):
+    result: dict
+    format: str = Field(default="markdown", pattern="^(markdown|html)$")
+    title: str = Field(default="Actualizer Report", min_length=1, max_length=200)
 
 
 class RefreshNotesRequest(BaseModel):
@@ -560,6 +617,7 @@ def _iter_analyze_events(
 
         drafted_count = len(suggestions)
         analyze_failed = False
+        _record_analytics(analyzed_sources=1)
         yield {
             "type": "result",
             "source": {
@@ -718,6 +776,9 @@ def get_status():
         "auth_required": bool(settings.api_token),
         "embedding_provider": settings.embedding_provider,
         "embedding_model": settings.embedding_model,
+        "embedding_backend": settings.embedding_backend,
+        "embedding_device": settings.embedding_device,
+        "vector_backend": settings.vector_backend,
         "thresholds": {
             "novel": settings.novel_threshold,
             "known": settings.known_threshold,
@@ -743,15 +804,30 @@ def get_status():
         "llm_draft_batch_size": settings.llm_draft_batch_size,
         "multi_vault_index_enabled": settings.multi_vault_index_enabled,
         "append_under_overlap_heading": settings.append_under_overlap_heading,
+        "git_auto_commit_on_apply": settings.git_auto_commit_on_apply,
         "intelligence": {
             "draft_rag_enabled": settings.draft_rag_enabled,
             "draft_rag_top_k": settings.draft_rag_top_k,
             "duplicate_detection_enabled": settings.duplicate_detection_enabled,
             "duplicate_similarity_threshold": settings.duplicate_similarity_threshold,
             "note_quality_scoring_enabled": settings.note_quality_scoring_enabled,
+            "auto_tagging_enabled": settings.auto_tagging_enabled,
+            "prompt_domain": settings.prompt_domain or None,
+        },
+        "capabilities": {
+            "audio_video": True,
+            "vision": settings.vision_media_enabled,
+            "rag_chat": True,
+            "analytics": True,
         },
         "metrics": metrics.snapshot(),
     }
+
+
+@app.get("/api/debug/recent-logs")
+def get_recent_logs(limit: int = Query(default=100, ge=1, le=200)):
+    """Return a bounded, redacted in-memory log view for local administration."""
+    return {"logs": recent_logs(limit)}
 
 
 @app.post("/api/vault/watch")
@@ -867,6 +943,85 @@ def search_vault(
             for match in matches
         ],
     }
+
+
+@app.get("/api/vault/index/export")
+def export_index_metadata(
+    vault_path: str | None = None,
+    limit: int = Query(default=1000, ge=1, le=5000),
+):
+    """Export portable index metadata; vectors are rebuilt with the target backend."""
+    vault = _resolve_vault_path(vault_path)
+    store = get_vector_store(vault)
+    samples = store.sample_chunks(limit=limit)
+    return {
+        "format": "actualizer-index-metadata-v1",
+        "vector_backend": settings.vector_backend,
+        "embedding_provider": settings.embedding_provider,
+        "embedding_model": settings.embedding_model,
+        "vault_path": str(vault),
+        "index_meta": load_index_meta(),
+        "chunks": [
+            {
+                "chunk_id": item.chunk_id,
+                "note_path": item.note_path,
+                "text": item.text,
+            }
+            for item in samples
+        ],
+        "truncated": store.chunk_count() > len(samples),
+    }
+
+
+@app.post("/api/chat")
+def chat_with_vault(request: ChatRequest):
+    """Retrieve relevant chunks and emit an NDJSON-compatible completed answer."""
+    vault = _resolve_vault_path(request.vault_path)
+    store = get_vector_store(vault)
+    if store.chunk_count() == 0:
+        raise HTTPException(status_code=400, detail="Index is empty — index the vault first.")
+    try:
+        result = answer_vault_question(
+            request.question.strip(),
+            store,
+            source_context=request.source_context,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Vault chat failed: {exc}") from exc
+    events = [
+        {"type": "citations", "citations": result.citations},
+        {"type": "answer", "text": result.answer},
+        {"type": "done"},
+    ]
+    return StreamingResponse(
+        iter(json.dumps(event) + "\n" for event in events),
+        media_type="application/x-ndjson",
+    )
+
+
+@app.get("/api/analytics")
+def get_analytics():
+    return load_analytics()
+
+
+@app.post("/api/reports/export")
+def export_analysis_report(request: ReportExportRequest):
+    """Download a portable report for the reviewed analysis result."""
+    if request.format == "html":
+        content = generate_html_report(request.result, title=request.title)
+        media_type = "text/html"
+        filename = "actualizer-report.html"
+    else:
+        content = generate_markdown_report(request.result, title=request.title)
+        media_type = "text/markdown"
+        filename = "actualizer-report.md"
+    return Response(
+        content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/vault/thresholds/calibrate")
@@ -1018,6 +1173,7 @@ async def apply_note_suggestions_batch(request: ApplySuggestionsBatchRequest):
             notes=[note.model_dump() for note in request.notes],
         )
         written_paths = [r.written_path for r in results if r.written_path]
+        _record_analytics(written_notes=len(written_paths))
         skipped_existing = [r.note_path for r in results if r.status == "skipped_exists"]
         errors = [
             {"note_path": r.note_path, "error": r.error}
@@ -1025,6 +1181,9 @@ async def apply_note_suggestions_batch(request: ApplySuggestionsBatchRequest):
             if r.status == "error"
         ]
         index_refresh = _refresh_written_notes(vault_path, written_paths)
+        git_commit = _git_commit_for_paths(
+            vault_path, written_paths, request.source_title
+        )
         return {
             "results": [r.to_dict() for r in results],
             "written_paths": written_paths,
@@ -1032,6 +1191,7 @@ async def apply_note_suggestions_batch(request: ApplySuggestionsBatchRequest):
             "skipped_existing": skipped_existing,
             "errors": errors,
             "index_refresh": index_refresh,
+            "git_commit": git_commit,
             "vault_path": str(vault_path),
         }
 
@@ -1059,7 +1219,13 @@ async def apply_note_suggestion(request: ApplySuggestionRequest):
             )
         index_refresh = {}
         if result.written_path:
+            _record_analytics(written_notes=1)
             index_refresh = _refresh_written_notes(vault_path, [result.written_path])
+        git_commit = _git_commit_for_paths(
+            vault_path,
+            [result.written_path] if result.written_path else [],
+            request.source_title,
+        )
         return {
             "written_path": result.written_path,
             "mode": request.mode,
@@ -1067,6 +1233,7 @@ async def apply_note_suggestion(request: ApplySuggestionRequest):
             "overwritten": result.overwritten,
             "backup_path": result.backup_path,
             "index_refresh": index_refresh,
+            "git_commit": git_commit,
             "vault_path": str(vault_path),
         }
 

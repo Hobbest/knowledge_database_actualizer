@@ -62,7 +62,8 @@ from app.summarize import (
 )
 from app.text_limits import TEXT_LIMITS
 from app.text_utils import combine_segment_text, extract_topic_summary
-from app.vectorstore import VectorStore
+from app.update_detection import detect_update
+from app.vector_protocol import VectorStoreProtocol as VectorStore
 from app.wikilinks import format_wikilink
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,9 @@ class NoteSuggestion:
     quality_flags: list[str] | None = None
     duplicate_of: str | None = None
     duplicate_similarity: float | None = None
+    update_type: str | None = None
+    update_target: str | None = None
+    update_reason: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -108,6 +112,9 @@ class NoteSuggestion:
             "quality_flags": list(self.quality_flags or []),
             "duplicate_of": self.duplicate_of,
             "duplicate_similarity": self.duplicate_similarity,
+            "update_type": self.update_type,
+            "update_target": self.update_target,
+            "update_reason": self.update_reason,
         }
 
     @classmethod
@@ -130,6 +137,9 @@ class NoteSuggestion:
             quality_flags=list(data.get("quality_flags") or []) or None,
             duplicate_of=data.get("duplicate_of"),
             duplicate_similarity=data.get("duplicate_similarity"),
+            update_type=data.get("update_type"),
+            update_target=data.get("update_target"),
+            update_reason=data.get("update_reason"),
         )
 
 
@@ -343,11 +353,22 @@ def _link_sibling_notes(
             suggestion.content = _inject_related_links(suggestion.content, links)
 
 
-def _infer_note_tags(overlapping_notes: list[OverlappingNote]) -> list[str]:
+def _infer_note_tags(
+    overlapping_notes: list[OverlappingNote],
+    *,
+    vector_store: VectorStore | None = None,
+    topic_text: str = "",
+) -> list[str]:
     tags: list[str] = list(settings.default_note_tags_list)
-    for note in overlapping_notes[: TEXT_LIMITS.related_link_count]:
+    for note in overlapping_notes[: settings.auto_tagging_top_k]:
         tags.extend(note.tags)
-    return list(dict.fromkeys(tag for tag in tags if tag))
+    if settings.auto_tagging_enabled and vector_store is not None and topic_text.strip():
+        try:
+            for match in vector_store.query_similar(topic_text, top_k=settings.auto_tagging_top_k):
+                tags.extend(match.tags)
+        except Exception:  # noqa: BLE001 - inferred tags are optional metadata
+            pass
+    return list(dict.fromkeys(tag for tag in tags if tag))[: settings.auto_tagging_max_tags]
 
 
 def _build_moc_suggestion(
@@ -979,7 +1000,12 @@ def _build_suggestion(
     body = body.rstrip() + f"\n\n## Related notes\n\n{related_section}\n"
 
     body = body.rstrip() + "\n\n" + _source_section(source, location)
-    note_tags = _infer_note_tags(overlapping_notes or [])
+    topic_text = combine_segment_text(topic.segments)
+    note_tags = _infer_note_tags(
+        overlapping_notes or [],
+        vector_store=vector_store,
+        topic_text=topic_text,
+    )
     content = _build_frontmatter(source, title, location, tags=note_tags) + body
     content = apply_note_template(
         content,
@@ -1016,17 +1042,45 @@ def _build_suggestion(
         note_path = f"{note_path[:-3]}-{suffix}.md"
     used_paths.add(note_path)
 
+    update_type: str | None = None
+    update_reason: str | None = None
+    update_target: str | None = None
+    if vector_store is not None and topic_text.strip():
+        try:
+            closest = vector_store.query_similar(topic_text, top_k=1)
+            if closest:
+                detection = detect_update(
+                    topic_text,
+                    closest[0].text,
+                    similarity=closest[0].content_similarity,
+                )
+                update_type = detection.update_type
+                update_reason = detection.update_reason
+                if update_type:
+                    update_target = closest[0].note_path
+                    if not append_target:
+                        append_target = closest[0].note_path
+                        append_heading = closest[0].heading
+                        overlap_similarity = round(
+                            closest[0].content_similarity, 3
+                        )
+        except Exception:  # noqa: BLE001 - update hints are best-effort
+            pass
+
     suggestion = NoteSuggestion(
         concept_title=title,
         note_path=note_path,
         content=content,
         location=location.to_dict(),
         segment_indices=[segment.index for segment in topic.segments],
-        write_mode="write",
+        write_mode="append" if update_type and append_target else "write",
         append_target=append_target,
         append_heading=append_heading,
         overlap_similarity=overlap_similarity,
         is_novel=bool(topic.is_novel),
+        update_type=update_type,
+        update_target=update_target,
+        update_reason=update_reason,
     )
     _apply_analyze_in_place(suggestion, vault_note_path)
     return suggestion

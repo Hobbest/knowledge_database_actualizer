@@ -1,0 +1,4 @@
+# Optional ONNX acceleration for local sentence-transformers embeddings.
+sentence-transformers[onnx]==5.6.0
+optimum[onnxruntime]==2.1.0
+onnxruntime==1.23.2

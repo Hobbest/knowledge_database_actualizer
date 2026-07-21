@@ -14,6 +14,10 @@ class TextChunk:
 HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 _LIST_LINE_PATTERN = re.compile(r"^\s*([-*+]|\d+\.)\s+")
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
+_ABBREVIATION_END = re.compile(
+    r"(?:\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e)|\b[A-Z])\.$",
+    re.IGNORECASE,
+)
 
 
 def _split_by_headings(text: str) -> list[tuple[str | None, str]]:
@@ -121,6 +125,21 @@ def _split_at_word_boundary(text: str, chunk_size: int) -> list[str]:
     return pieces
 
 
+def _split_sentences(text: str) -> list[str]:
+    """Split prose semantically while avoiding common abbreviation boundaries."""
+    candidates = _SENTENCE_BOUNDARY.split(text)
+    sentences: list[str] = []
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        if sentences and _ABBREVIATION_END.search(sentences[-1]):
+            sentences[-1] = f"{sentences[-1]} {candidate}"
+        else:
+            sentences.append(candidate)
+    return sentences
+
+
 def _split_oversized_unit(text: str, chunk_size: int) -> list[str]:
     """Split a single oversized unit on sentence, then word/character boundaries."""
     if len(text) <= chunk_size:
@@ -129,7 +148,7 @@ def _split_oversized_unit(text: str, chunk_size: int) -> list[str]:
     if text.lstrip().startswith("```"):
         return _split_at_word_boundary(text, chunk_size)
 
-    sentences = _SENTENCE_BOUNDARY.split(text)
+    sentences = _split_sentences(text)
     if len(sentences) <= 1:
         return _split_at_word_boundary(text, chunk_size)
 

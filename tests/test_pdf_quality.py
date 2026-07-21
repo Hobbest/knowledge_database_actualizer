@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.sources.pdf_quality import assess_pdf_extraction_quality
+from app.sources.pdf_quality import assess_pdf_extraction_quality, page_text_is_unreliable
 
 
 def test_pdf_quality_warns_on_sparse_pages():
@@ -33,3 +33,16 @@ def test_pdf_quality_accepts_readable_text():
         text=readable,
     )
     assert warnings == []
+
+
+def test_page_quality_marks_sparse_and_garbled_text_unreliable():
+    assert page_text_is_unreliable("A short fragment.")
+    assert page_text_is_unreliable(" ".join(["xqz", "qwx", "zzz"] * 20))
+
+
+def test_page_quality_accepts_readable_page():
+    text = (
+        "Vector databases store embeddings for semantic search and efficient retrieval. "
+        "Nearest-neighbor indexes make comparison practical across large collections. "
+    )
+    assert not page_text_is_unreliable(text)

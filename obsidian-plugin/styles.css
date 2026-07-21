@@ -182,6 +182,17 @@
   font-size: 11px;
 }
 
+.actualizer-warning {
+  color: var(--text-warning);
+  font-size: 11px;
+  margin: 0.2rem 0;
+}
+
+.actualizer-inline-button {
+  margin: 0.25rem 0;
+  font-size: 11px;
+}
+
 .actualizer-verdict {
   display: inline-block;
   padding: 0.15rem 0.5rem;

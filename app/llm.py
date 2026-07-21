@@ -9,6 +9,7 @@ from functools import lru_cache
 from typing import TypeVar
 
 from app.config import settings
+from app.plugin_api import discover_llm_providers
 
 logger = logging.getLogger(__name__)
 
@@ -289,9 +290,14 @@ def _create_llm_provider(config: tuple) -> LLMProvider | None:
         return GeminiProvider(api_key, model)
     if provider in {"ollama", "local"}:
         return OllamaProvider(model, ollama_base_url)
+    plugin = discover_llm_providers().get(provider)
+    if plugin is not None:
+        factory = plugin
+        return factory(model=model, api_key=api_key, settings=settings)
     raise ValueError(
         f"Unsupported LLM_PROVIDER '{settings.llm_provider}'. "
-        "Use openai, anthropic, gemini, or ollama (local)."
+        "Use openai, anthropic, gemini, ollama (local), or an installed "
+        "'actualizer.llm_providers' entry point."
     )
 
 

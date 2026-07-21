@@ -3,11 +3,25 @@ from __future__ import annotations
 import re
 
 _WORD_PATTERN = re.compile(r"[A-Za-z']+")
+_MIN_USEFUL_PAGE_CHARS = 80
 
 
 def _looks_like_word(token: str) -> bool:
     lowered = token.lower().strip("'")
     return len(lowered) >= 3 and any(char in "aeiouy" for char in lowered)
+
+
+def page_text_is_unreliable(text: str) -> bool:
+    """Return whether a page should be retried with another extraction method."""
+    stripped = text.strip()
+    if len(stripped) < _MIN_USEFUL_PAGE_CHARS:
+        return True
+
+    words = _WORD_PATTERN.findall(stripped)
+    if len(words) < 10:
+        return True
+    readable_ratio = sum(_looks_like_word(word) for word in words) / len(words)
+    return readable_ratio < 0.55
 
 
 def assess_pdf_extraction_quality(

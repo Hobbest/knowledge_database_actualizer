@@ -6,6 +6,7 @@ import json
 import re
 
 from app.novelty import NoveltyResult
+from app.prompt_domains import selected_domain_rules
 from app.sources.base import LoadedSource
 from app.text_limits import TEXT_LIMITS
 
@@ -72,6 +73,10 @@ def _format_rules(rules: tuple[str, ...]) -> str:
     return "\n".join(f"- {rule}" for rule in rules)
 
 
+def _domain_rules(base: tuple[str, ...]) -> tuple[str, ...]:
+    return (*base, *selected_domain_rules())
+
+
 def topic_planning_prompt(
     *,
     source: LoadedSource,
@@ -95,7 +100,7 @@ def topic_planning_prompt(
         '- "segment_indices": list of segment index integers to include\n'
         '- "summary": compact 2-5 sentence explanation of the single concept\n\n'
         "Rules:\n"
-        f"{_format_rules(TOPIC_PLANNING_RULES)}\n"
+        f"{_format_rules(_domain_rules(TOPIC_PLANNING_RULES))}\n"
     )
 
 
@@ -130,7 +135,7 @@ def batch_note_draft_prompt(
         "# <title>\n"
         "<markdown body>\n\n"
         "Rules:\n"
-        f"{_format_rules(ATOMIC_NOTE_RULES)}\n"
+        f"{_format_rules(_domain_rules(ATOMIC_NOTE_RULES))}\n"
         f"- Keep each note compact (under {max_note_lines} lines)\n"
         "- Start each block with a line '===NOTE <id>===' using the exact id from "
         "the input, exactly once per concept\n"
@@ -167,7 +172,7 @@ def note_draft_prompt(
         f"{context_block}\n"
         f"{wrap_untrusted('source excerpt', excerpt)}\n\n"
         "Requirements:\n"
-        f"{_format_rules(ATOMIC_NOTE_RULES)}\n"
+        f"{_format_rules(_domain_rules(ATOMIC_NOTE_RULES))}\n"
         f"- Start with '# {safe_title}'\n"
         f"- Keep the note compact (under {max_note_lines} lines)\n"
     )

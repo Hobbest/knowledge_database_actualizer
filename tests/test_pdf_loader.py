@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import sys
 from io import BytesIO
+from types import SimpleNamespace
 
 import pytest
 from app.sources import SourceDispatcher
@@ -64,6 +66,141 @@ def test_dispatcher_loads_pdf_bytes_with_content_hash_identity():
     assert source.source_key.startswith("upload:sha256:")
     assert source.segments
     assert "Uploaded PDF body" in source.text
+
+
+def test_pdf_loader_uses_pdfplumber_for_sparse_pypdf_page(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    path = tmp_path / "fallback.pdf"
+    path.write_bytes(b"mock-pdf")
+    fallback_text = (
+        "pdfplumber recovered a complete paragraph from a page whose original "
+        "pypdf extraction contained too little useful text for reliable analysis."
+    )
+
+    class FakePypdfPage:
+        def extract_text(self):
+            return "x"
+
+    class FakePlumberPage:
+        def extract_text(self):
+            return fallback_text
+
+    class FakePlumberPdf:
+        pages = [FakePlumberPage()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    import app.sources.pdf as pdf_module
+
+    monkeypatch.setattr(pdf_module, "PdfReader", lambda _path: SimpleNamespace(pages=[FakePypdfPage()]))
+    monkeypatch.setattr(
+        pdf_module,
+        "settings",
+        SimpleNamespace(include_media=False, pdf_ocr_enabled=False),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "pdfplumber",
+        SimpleNamespace(open=lambda _path: FakePlumberPdf()),
+    )
+
+    source = PdfLoader().load_from_path(path)
+
+    assert source.text == fallback_text
+    assert source.segments[0].location.page == 1
+
+
+def test_pdf_loader_warns_when_ocr_dependencies_are_unavailable(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    path = tmp_path / "scan.pdf"
+    path.write_bytes(_pdf_bytes_for_pages([""]))
+
+    import app.sources.pdf as pdf_module
+
+    monkeypatch.setattr(
+        pdf_module,
+        "settings",
+        SimpleNamespace(
+            include_media=False,
+            pdf_ocr_enabled=True,
+            pdf_ocr_language="eng",
+            pdf_ocr_dpi=300,
+        ),
+    )
+    monkeypatch.setattr(pdf_module, "convert_from_path", None)
+    monkeypatch.setattr(pdf_module, "pytesseract", None)
+
+    with pytest.raises(ValueError, match="No extractable text"):
+        PdfLoader().load_from_path(path)
+    assert "optional OCR dependencies are unavailable" in caplog.text
+
+
+def test_pdf_loader_ocrs_only_pages_still_sparse(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    path = tmp_path / "mixed.pdf"
+    path.write_bytes(b"mock-pdf")
+    readable_text = (
+        "This text page already contains enough readable material for reliable "
+        "analysis and therefore must never be rendered by the OCR fallback."
+    )
+    ocr_text = "OCR recovered the scanned second page with useful readable text."
+    render_calls = []
+
+    class FakePage:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def extract_text(self):
+            return self.text
+
+    def fake_render(_path, **kwargs):
+        render_calls.append(kwargs)
+        return [object()]
+
+    import app.sources.pdf as pdf_module
+
+    monkeypatch.setattr(
+        pdf_module,
+        "PdfReader",
+        lambda _path: SimpleNamespace(pages=[FakePage(readable_text), FakePage("")]),
+    )
+    monkeypatch.setattr(PdfLoader, "_extract_text_with_pdfplumber", lambda *_args: {})
+    monkeypatch.setattr(
+        pdf_module,
+        "settings",
+        SimpleNamespace(
+            include_media=False,
+            pdf_ocr_enabled=True,
+            pdf_ocr_language="eng",
+            pdf_ocr_dpi=250,
+        ),
+    )
+    monkeypatch.setattr(pdf_module, "convert_from_path", fake_render)
+    monkeypatch.setattr(
+        pdf_module,
+        "pytesseract",
+        SimpleNamespace(image_to_string=lambda _image, lang: ocr_text),
+    )
+
+    source = PdfLoader().load_from_path(path)
+
+    assert ocr_text in source.text
+    assert render_calls == [{"dpi": 250, "first_page": 2, "last_page": 2}]
+
+
+def test_pdf_loader_rejects_corrupt_pdf(tmp_path):
+    path = tmp_path / "corrupt.pdf"
+    path.write_bytes(b"not a pdf")
+
+    with pytest.raises(ValueError, match="Invalid or unreadable PDF"):
+        PdfLoader().load_from_path(path)
 
 
 @pytest.fixture()

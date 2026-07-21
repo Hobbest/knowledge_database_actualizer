@@ -777,7 +777,7 @@ class ActualizerView extends ItemView {
     this.selected = new Set(
       this.suggestions
         .map((item, index) =>
-          item.is_moc || item.is_novel === false ? null : index
+          item.is_moc || item.is_novel === false || item.duplicate_of ? null : index
         )
         .filter((index) => index !== null)
     );
@@ -1228,6 +1228,23 @@ class ActualizerView extends ItemView {
         text: "Deselected by default: this topic looks known or only partially new in your vault. Select it to write or append anyway.",
       });
     }
+    if (item.duplicate_of) {
+      box.createEl("div", {
+        cls: "actualizer-warning",
+        text: `Near-duplicate of ${item.duplicate_of} (${item.duplicate_similarity || "similar"}); deselected by default.`,
+      });
+    }
+    if (item.quality_score != null) {
+      box.createEl("div", {
+        cls: "actualizer-muted",
+        text: `Quality ${Number(item.quality_score).toFixed(2)}${item.quality_flags?.length ? ` · ${item.quality_flags.join(", ")}` : ""}`,
+      });
+    }
+    const inlineButton = box.createEl("button", {
+      cls: "actualizer-inline-button",
+      text: "Insert at cursor",
+    });
+    inlineButton.onclick = () => this.plugin.insertSuggestionAtCursor(item);
 
     const pathRow = box.createEl("div", { cls: "actualizer-field" });
     pathRow.createEl("label", { text: "Vault path" });
@@ -1804,6 +1821,12 @@ class KnowledgeDatabaseActualizerPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "actualizer-insert-selected-at-cursor",
+      name: "Insert first selected suggestion at cursor",
+      callback: () => this.insertSelectedAtCursor(),
+    });
+
+    this.addCommand({
       id: "actualizer-cancel-analyze",
       name: "Cancel analysis",
       callback: () => this.cancelAnalyze(),
@@ -1904,6 +1927,29 @@ class KnowledgeDatabaseActualizerPlugin extends Plugin {
       return;
     }
     await view.writeSelected();
+  }
+
+  async insertSelectedAtCursor() {
+    const view = (await this.activateView()) || (await this.getView());
+    if (!view || !view.suggestions?.length || !view.selected?.size) {
+      new Notice("Select a proposed note in the Actualizer sidebar first");
+      return;
+    }
+    const index = Array.from(view.selected).sort((a, b) => a - b)[0];
+    await this.insertSuggestionAtCursor(view.suggestions[index]);
+  }
+
+  async insertSuggestionAtCursor(suggestion) {
+    const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const editor = markdownView?.editor;
+    if (!editor || !suggestion?.content) {
+      new Notice("Open a Markdown editor before inserting a suggestion");
+      return;
+    }
+    const cursor = editor.getCursor();
+    const prefix = cursor.ch === 0 ? "" : "\n";
+    editor.replaceRange(`${prefix}${String(suggestion.content).trim()}\n`, cursor);
+    new Notice(`Inserted “${suggestion.concept_title || "suggestion"}” at cursor`);
   }
 
   async openVaultNote(relativePath) {

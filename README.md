@@ -3,6 +3,8 @@
 A local web app that helps you decide whether a knowledge source (YouTube video, web article, PDF, EPUB, DOCX, text, markdown) contains **new information** relative to your Obsidian-style markdown vault.
 
 > For system design (diagrams + module map), see [`ARCHITECTURE.md`](ARCHITECTURE.md).
+> For development workflow and contribution checks, see
+> [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Features
 
@@ -17,19 +19,17 @@ A local web app that helps you decide whether a knowledge source (YouTube video,
 ## Quick start
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# Optional: copy and edit environment variables
-cp .env.example .env
-
-# Run the app (always use the project virtualenv — not Anaconda/base Python)
+./scripts/setup_dev.sh
 .venv/bin/uvicorn app.main:app --reload
 # or: ./scripts/run_dev_server.sh
 ```
 
 Open http://127.0.0.1:8000
+
+The setup script is safe to rerun: it creates `.venv` when needed, installs
+`requirements-dev.txt`, and merges missing settings into `.env` without
+overwriting existing values. For a runtime-only installation, create a virtual
+environment manually and install `requirements.txt`.
 
 ### Troubleshooting: `google.protobuf` / `FieldDescriptor` ImportError
 
@@ -46,6 +46,19 @@ pip install -r requirements.txt
 ```
 
 Do **not** run `uvicorn` from `anaconda3/bin` unless you have repaired protobuf there.
+
+### Troubleshooting matrix
+
+| Symptom | Likely cause | Resolution |
+|---------|--------------|------------|
+| `google.protobuf` or `FieldDescriptor` import error | Global/Anaconda Python is running the app | Run `./scripts/setup_dev.sh`, then use `.venv/bin/uvicorn` |
+| PDF has missing or scrambled paragraphs | Complex layout defeated the primary extractor | Ensure `pdfplumber` is installed from `requirements.txt`; inspect the extraction warning |
+| Scanned PDF yields no text | OCR is disabled or its optional tools are absent | Install `requirements-ocr.txt`, Poppler, and Tesseract; set `PDF_OCR_ENABLED=true` |
+| OCR reports a language error | Tesseract language data is missing | Install the language pack matching `PDF_OCR_LANGUAGE` |
+| OCR cannot render PDF pages | Poppler is absent or not on `PATH` | Install Poppler (`poppler-utils` on Debian/Ubuntu) and restart the app |
+| Upload is rejected | File exceeds `MAX_UPLOAD_MB` | Raise the limit deliberately or reduce the file size |
+| Remote access returns 401 or refuses startup | A non-loopback deployment needs authentication | Set a strong `API_TOKEN` and send it from the client |
+| Remote hostname is rejected | Host is absent from `ALLOWED_HOSTS` | Add the exact hostname; do not disable host validation on an exposed service |
 
 The UI loads Tailwind and vis-network from `frontend/vendor/` (no CDN), so it works offline once dependencies are installed.
 
@@ -151,6 +164,10 @@ For anything beyond local development:
 - Set `ALLOWED_VAULT_ROOTS` (or rely on `VAULT_PATH` locking) so clients cannot point the API at arbitrary host directories.
 - Set a sensible `MAX_UPLOAD_MB` / `MAX_FETCH_MB`, and expand `ALLOWED_HOSTS` only when serving beyond loopback.
 - Mount persistent `DATA_DIR` and a **read-write** vault volume when you want Apply / write-to-vault to work (compose defaults to RW).
+- Put the localhost-bound app behind Caddy or nginx for TLS and request limits.
+  Preserve streaming responses by disabling proxy buffering, use timeouts long
+  enough for document analysis, and set the proxy body limit no higher than the
+  intended `MAX_UPLOAD_MB`.
 
 ```bash
 # Docker (requires API_TOKEN in the environment)
@@ -160,6 +177,12 @@ docker compose up --build
 # systemd (example unit in deploy/knowledge-database-actualizer.service)
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
+
+Caddy is the simplest default when automatic HTTPS is desired. nginx is also
+appropriate when it is already part of the deployment; configure
+`proxy_buffering off`, forward the original `Host` and client scheme, and keep
+the application bound to `127.0.0.1`. Terminate TLS at the proxy and expose
+only the proxy port.
 
 The web UI and Obsidian plugin both write through `POST /api/suggestions/apply-batch`
 so server-side `.bak` backups, atomic writes, block references, and append merge
@@ -261,9 +284,28 @@ your preferences match.
 ### PDF extraction quality
 
 Text-based PDFs work well; scanned PDFs and complex layouts often extract poorly.
-When extraction looks unreliable (sparse pages or garbled words), the analyze
-stream emits a warning so you can treat novelty verdicts with caution. There is
-no OCR fallback yet.
+Sparse or garbled pages are retried with `pdfplumber`; structured tables remain
+available as markdown media. When extraction is still unreliable, the analyze
+stream emits a warning so you can treat novelty verdicts with caution.
+
+OCR is opt-in because it adds system dependencies and processing time:
+
+```bash
+.venv/bin/pip install -r requirements-ocr.txt
+# Also install Poppler and Tesseract with your OS package manager.
+
+PDF_OCR_ENABLED=true
+PDF_OCR_LANGUAGE=eng
+PDF_OCR_DPI=300
+```
+
+Only pages that remain sparse after both text extractors are rendered and sent
+to Tesseract. Missing dependencies and per-page OCR failures produce warnings
+instead of aborting extraction when another page has usable text. For language
+errors, install the corresponding Tesseract data package and set
+`PDF_OCR_LANGUAGE` to its code. For renderer errors, verify that Poppler tools
+such as `pdftoppm` are on `PATH`. Higher DPI can improve small print but uses
+more memory and CPU.
 
 It also drops **low-value blocks** detected structurally — link/URL dumps,
 citation-marker lists (`[17] http://…[18] http://…`), and export watermarks
@@ -422,6 +464,18 @@ releases.
 - `POST /api/suggestions/apply` `{ "note_path", "content", "mode": "write|append", "overwrite": false, "append_heading": null }` — also re-indexes written notes; `append_heading` inserts under a matching `##` section when mode is `append`
 - `POST /api/suggestions/apply-batch` `{ "notes": [{ "note_path", "content", "mode", "overwrite", "append_heading" }] }` — returns per-note `results`, `written_paths`, `skipped_existing`, `errors`, and `index_refresh`
 - `POST /api/vault/refresh-notes` `{ "vault_path", "note_paths" }` — re-embed notes already written via the Obsidian plugin (or other external tools)
+- `POST /api/chat` `{ "question", "vault_path", "source_context" }` — NDJSON vault answer with note citations
+- `GET /api/analytics` — persisted daily source/note activity
+- `POST /api/reports/export` `{ "result", "format": "markdown|html" }` — portable analysis report
+- `GET /api/vault/index/export` — portable index/chunk metadata for backend migration
+
+## Interface preview
+
+![Actualizer web interface](docs/images/web-ui-overview.png)
+
+The same workflow adapts to narrow screens:
+
+![Actualizer mobile layout](docs/images/web-ui-mobile.png)
 
 ## Sample vault
 
@@ -462,6 +516,24 @@ are reported on index — use a path-qualified link for those.
 - **Quality scoring:** heuristic 0–1 scores (`NOTE_QUALITY_SCORING_ENABLED`) highlight structural issues (heading mismatch, weak definition, missing related links).
 - **Domain embeddings:** pick any supported local Hugging Face or Gemini embedding model via `EMBEDDING_PROVIDER` / `EMBEDDING_MODEL` (no separate fine-tuning pipeline).
 
+## Extended sources, backends, and automation
+
+- Install `requirements-audio.txt` for local Whisper transcription of common
+  audio/video uploads. Install `requirements-ocr.txt` for scanned-PDF OCR.
+- `PROMPT_DOMAIN=research|programming|history` selects a bundled prompt pack.
+  Similar vault tags are also suggested automatically.
+- `EMBEDDING_DEVICE=auto|cpu|cuda|mps` selects local acceleration. For ONNX,
+  install `requirements-performance.txt` and set `EMBEDDING_BACKEND=onnx`.
+- Chroma remains the default. To use Qdrant, install
+  `requirements-qdrant.txt`, set `VECTOR_BACKEND=qdrant`, configure
+  `QDRANT_URL`, and set `QDRANT_VECTOR_SIZE` to the embedding model dimension.
+- `GIT_AUTO_COMMIT_ON_APPLY=true` commits only paths written by each apply
+  request when the vault is inside a Git repository. It never pushes, amends,
+  force-updates, or includes unrelated paths.
+- Third-party packages can expose source loaders through the
+  `actualizer.source_loaders` entry-point group and LLM factories through
+  `actualizer.llm_providers`.
+
 ## Project structure
 
 ```
@@ -471,6 +543,8 @@ are reported on index — use a path-qualified link for those.
   chunking.py        # text chunking
   embeddings.py      # local embeddings
   vectorstore.py     # Chroma index/query
+  qdrant_store.py    # optional Qdrant adapter
+  vector_protocol.py # backend interface
   graph.py           # networkx graph
   novelty.py         # verdict logic
   llm.py             # optional LLM providers
@@ -478,7 +552,9 @@ are reported on index — use a path-qualified link for those.
   note_intelligence.py  # draft RAG, quality scores, duplicate detection
   note_output.py     # note path patterns + append helpers
   vault_watcher.py   # debounced index-on-save
-  sources/           # YouTube, web article, PDF, EPUB, DOCX, text loaders
+  sources/           # YouTube, web, audio/video, PDF, EPUB, DOCX, text loaders
+  analytics.py       # persisted knowledge-growth counters
+  reports.py         # Markdown/HTML run exports
   main.py            # FastAPI app
 obsidian-plugin/     # Obsidian thin client (optional)
 frontend/

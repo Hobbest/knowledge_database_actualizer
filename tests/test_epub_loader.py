@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from app.sources import SourceDispatcher
 from app.sources.epub import EpubLoader
 from ebooklib import epub
@@ -108,3 +109,11 @@ def test_epub_loader_tolerates_broken_image_manifest_paths(tmp_path):
     assert source.title == "Broken Image EPUB"
     assert "Text survives even when image manifest hrefs are malformed." in source.text
     assert source.segments
+
+
+def test_epub_loader_rejects_corrupt_archive(tmp_path):
+    path = tmp_path / "corrupt.epub"
+    path.write_bytes(b"not a zip archive")
+
+    with pytest.raises(ValueError, match="Invalid EPUB archive"):
+        EpubLoader().load_from_path(path)

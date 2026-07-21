@@ -17,7 +17,9 @@ from pathlib import Path
 from app.config import Settings
 
 # Never emit non-empty values for these in generated / merged template lines.
-SECRET_FIELDS = frozenset({"llm_api_key", "embedding_api_key", "api_token"})
+SECRET_FIELDS = frozenset(
+    {"llm_api_key", "embedding_api_key", "api_token", "qdrant_api_key"}
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 ENV_EXAMPLE_PATH = ROOT / ".env.example"
@@ -56,11 +58,30 @@ ENV_SECTIONS: tuple[EnvSection, ...] = (
             "# EMBEDDING_PROVIDER: local (sentence-transformers) or gemini",
             "# Local models: all-MiniLM-L6-v2 (default, fast), all-mpnet-base-v2, bge-small-en-v1.5",
         ),
-        fields=("embedding_provider", "embedding_model"),
+        fields=(
+            "embedding_provider",
+            "embedding_model",
+            "embedding_device",
+            "embedding_backend",
+            "embedding_quantized",
+        ),
     ),
     EnvSection(
         header=("# Optional Gemini embedding API key (falls back to LLM_API_KEY)",),
         fields=("embedding_api_key",),
+    ),
+    EnvSection(
+        header=(
+            "# Vector storage: Chroma is embedded; Qdrant requires requirements-qdrant.txt.",
+            "# QDRANT_VECTOR_SIZE must match the configured embedding model.",
+        ),
+        fields=(
+            "vector_backend",
+            "qdrant_url",
+            "qdrant_api_key",
+            "qdrant_collection",
+            "qdrant_vector_size",
+        ),
     ),
     EnvSection(
         header=(
@@ -131,6 +152,19 @@ ENV_SECTIONS: tuple[EnvSection, ...] = (
     ),
     EnvSection(
         header=(
+            "# Optional local audio/video transcription via requirements-audio.txt.",
+            "# WHISPER_LANGUAGE may be blank for automatic language detection.",
+        ),
+        fields=(
+            "whisper_model",
+            "whisper_device",
+            "whisper_compute_type",
+            "whisper_language",
+            "whisper_beam_size",
+        ),
+    ),
+    EnvSection(
+        header=(
             "# Skip non-substantive sections (acknowledgements, table of contents, reference",
             "# lists, chapter summaries, contact/copyright pages) when generating notes.",
             "# Set to false to keep every section.",
@@ -142,13 +176,26 @@ ENV_SECTIONS: tuple[EnvSection, ...] = (
             "# Detect tables (real PDF tables via pdfplumber + markdown pipe tables) and",
             "# figure captions, and attach the ones on a note's page/lines to that note.",
         ),
-        fields=("include_media",),
+        fields=(
+            "include_media",
+            "vision_media_enabled",
+            "vision_model",
+            "pdf_ocr_enabled",
+            "pdf_ocr_language",
+            "pdf_ocr_dpi",
+        ),
     ),
     EnvSection(
         header=(
             "# Comma-separated tags added to every drafted note (Obsidian frontmatter)",
         ),
-        fields=("default_note_tags",),
+        fields=(
+            "default_note_tags",
+            "auto_tagging_enabled",
+            "auto_tagging_top_k",
+            "auto_tagging_max_tags",
+            "prompt_domain",
+        ),
     ),
     EnvSection(
         header=(
@@ -210,6 +257,8 @@ ENV_SECTIONS: tuple[EnvSection, ...] = (
             "llm_max_planning_calls",
             "multi_vault_index_enabled",
             "append_under_overlap_heading",
+            "git_auto_commit_on_apply",
+            "git_commit_message",
         ),
     ),
     EnvSection(

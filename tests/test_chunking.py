@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.chunking import _split_into_units, chunk_text
+from app.chunking import _split_into_units, _split_sentences, chunk_text
 
 
 def test_chunk_text_keeps_short_text_whole():
@@ -46,6 +46,11 @@ def test_chunk_text_oversized_paragraph_splits_on_sentences():
     assert len(chunks) >= 2
     for chunk in chunks:
         assert len(chunk.text) <= 120
+
+
+def test_sentence_split_preserves_common_abbreviations():
+    sentences = _split_sentences("Dr. Rivera measured latency. It fell substantially.")
+    assert sentences == ["Dr. Rivera measured latency.", "It fell substantially."]
 
 
 def test_chunk_text_overlap_carries_trailing_context():

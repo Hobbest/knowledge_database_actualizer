@@ -2,6 +2,8 @@ const vaultPathInput = document.getElementById("vaultPath");
 const indexBtn = document.getElementById("indexBtn");
 const calibrateBtn = document.getElementById("calibrateBtn");
 const vaultWatchToggle = document.getElementById("vaultWatchToggle");
+const vaultSwitcherWrap = document.getElementById("vaultSwitcherWrap");
+const vaultSwitcher = document.getElementById("vaultSwitcher");
 const statusBox = document.getElementById("statusBox");
 const thresholdSummary = document.getElementById("thresholdSummary");
 const calibrationResult = document.getElementById("calibrationResult");
@@ -13,6 +15,15 @@ const vaultSearchMode = document.getElementById("vaultSearchMode");
 const vaultSearchBtn = document.getElementById("vaultSearchBtn");
 const vaultSearchMessage = document.getElementById("vaultSearchMessage");
 const vaultSearchResults = document.getElementById("vaultSearchResults");
+const vaultChatForm = document.getElementById("vaultChatForm");
+const vaultChatQuestion = document.getElementById("vaultChatQuestion");
+const vaultChatBtn = document.getElementById("vaultChatBtn");
+const vaultChatMessage = document.getElementById("vaultChatMessage");
+const vaultChatAnswer = document.getElementById("vaultChatAnswer");
+const vaultChatCitations = document.getElementById("vaultChatCitations");
+const refreshAnalyticsBtn = document.getElementById("refreshAnalyticsBtn");
+const analyticsTotals = document.getElementById("analyticsTotals");
+const analyticsBars = document.getElementById("analyticsBars");
 const sourceUrlInput = document.getElementById("sourceUrl");
 const sourceFileInput = document.getElementById("sourceFile");
 const vaultNotePathInput = document.getElementById("vaultNotePath");
@@ -59,11 +70,19 @@ const tagOverlapBox = document.getElementById("tagOverlapBox");
 const tagOverlapList = document.getElementById("tagOverlapList");
 const sourceMeta = document.getElementById("sourceMeta");
 const analysisConfig = document.getElementById("analysisConfig");
+const exportReportMd = document.getElementById("exportReportMd");
+const exportReportHtml = document.getElementById("exportReportHtml");
 const graphFilter = document.getElementById("graphFilter");
 const graphScope = document.getElementById("graphScope");
 const graphExportPng = document.getElementById("graphExportPng");
 const graphExportJson = document.getElementById("graphExportJson");
 const graphFilterSummary = document.getElementById("graphFilterSummary");
+const themeToggle = document.getElementById("themeToggle");
+const analyzeDropZone = document.getElementById("analyzeDropZone");
+const debugPanel = document.getElementById("debugPanel");
+const debugSummary = document.getElementById("debugSummary");
+const refreshDebugBtn = document.getElementById("refreshDebugBtn");
+const recentLogs = document.getElementById("recentLogs");
 const authDialog = document.getElementById("authDialog");
 const authForm = document.getElementById("authForm");
 const authCancelBtn = document.getElementById("authCancelBtn");
@@ -86,6 +105,7 @@ let graphNetwork = null;
 let currentGraphData = null;
 let currentFilteredGraph = null;
 let currentSuggestions = [];
+let latestAnalysisResult = null;
 let currentPage = 1;
 let pageSize = 10;
 let obsidianVaultName = null;
@@ -195,6 +215,11 @@ function showProgress(event) {
   progressBar.style.width = `${progress}%`;
   analyzeProgress.setAttribute("aria-valuenow", String(progress));
   analyzeProgress.setAttribute("aria-valuetext", progressLabel.textContent);
+  document.querySelectorAll("#progressStages [data-stage]").forEach((item) => {
+    const active = item.dataset.stage === event.stage;
+    item.classList.toggle("font-semibold", active);
+    item.classList.toggle("text-indigo-700", active);
+  });
 }
 
 function beginProgress(message = "Starting analysis...") {
@@ -275,6 +300,16 @@ async function loadStatus() {
     }
     if (status.vault_path) {
       vaultPathInput.value = status.vault_path;
+    }
+    const vaultEntries = Object.values(status.index_meta?.vaults || {});
+    if (status.multi_vault_index_enabled && vaultEntries.length) {
+      vaultSwitcher.innerHTML = vaultEntries
+        .map((entry) => `<option value="${escapeHtml(entry.vault_path)}">${escapeHtml(entry.vault_path)}</option>`)
+        .join("");
+      vaultSwitcher.value = status.vault_path || vaultEntries[0].vault_path;
+      vaultSwitcherWrap.classList.remove("hidden");
+    } else {
+      vaultSwitcherWrap.classList.add("hidden");
     }
     obsidianVaultName = status.obsidian_vault_name || null;
     obsidianUriEnabled = Boolean(status.obsidian_uri_enabled);
@@ -367,11 +402,47 @@ async function loadStatus() {
     } else {
       thresholdSummary.className = "text-slate-600";
     }
+    renderDebugSummary(status);
   } catch (error) {
     statusBox.textContent = `Failed to load status: ${error.message}`;
     statusBox.className = "text-sm text-red-600";
   }
 }
+
+function renderDebugSummary(status) {
+  const metrics = status.metrics || {};
+  const cards = [
+    ["Index", `${status.indexed_chunks || 0} chunks · ${status.stale_note_count || 0} stale`],
+    ["Requests", `${metrics.requests || 0} · ${metrics.request_errors || 0} errors · ${metrics.average_request_ms || 0} ms avg`],
+    ["Analyze", `${metrics.analyze_runs || 0} runs · ${metrics.notes_drafted || 0} notes · ${metrics.llm_calls || 0} LLM calls`],
+    ["Graph", `${status.graph_nodes || 0} nodes · ${status.graph_edges || 0} edges`],
+    ["Checkpoints", `${(status.incomplete_checkpoints || []).length} incomplete`],
+    ["Backend", `${status.embedding_provider}/${status.embedding_model} · ${status.llm_provider || "extractive"}`],
+  ];
+  debugSummary.innerHTML = cards
+    .map(([label, value]) => `<div class="border rounded p-2"><div class="text-xs text-slate-500">${escapeHtml(label)}</div><div>${escapeHtml(value)}</div></div>`)
+    .join("");
+}
+
+async function refreshDebug() {
+  refreshDebugBtn.disabled = true;
+  try {
+    await loadStatus();
+    const result = await fetchJson("/api/debug/recent-logs?limit=100");
+    recentLogs.textContent = (result.logs || [])
+      .map((item) => `${item.timestamp} ${item.level} ${item.logger}: ${item.message}`)
+      .join("\n") || "No logs captured yet.";
+  } catch (error) {
+    recentLogs.textContent = `Could not load debug data: ${error.message}`;
+  } finally {
+    refreshDebugBtn.disabled = false;
+  }
+}
+
+debugPanel.addEventListener("toggle", () => {
+  if (debugPanel.open) refreshDebug();
+});
+refreshDebugBtn.addEventListener("click", refreshDebug);
 
 vaultSearchForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -413,6 +484,11 @@ vaultSearchForm.addEventListener("submit", async (event) => {
   }
 });
 
+vaultSwitcher.addEventListener("change", () => {
+  vaultPathInput.value = vaultSwitcher.value;
+  statusBox.textContent = "Vault selected. Click Index vault to activate or refresh it.";
+});
+
 indexBtn.addEventListener("click", async () => {
   analyzeError.classList.add("hidden");
   indexBtn.disabled = true;
@@ -436,6 +512,15 @@ indexBtn.addEventListener("click", async () => {
       `${mode === "incremental" ? "Incremental index" : "Full index"}: ` +
       `${result.chunk_count} chunks from ${result.notes} notes (${result.links} links${updated}${skipped}).`;
     await loadStatus();
+    const thresholds = latestStatus?.thresholds;
+    const recommended = thresholds?.recommended;
+    const mismatch =
+      recommended &&
+      (Number(thresholds.novel) !== Number(recommended.novel_threshold) ||
+        Number(thresholds.known) !== Number(recommended.known_threshold));
+    if (thresholds?.calibration_available && mismatch) {
+      calibrateBtn.click();
+    }
   } catch (error) {
     statusBox.textContent = `Index failed: ${error.message}`;
   } finally {
@@ -768,6 +853,9 @@ function renderSuggestionsPage() {
       !suggestion.is_moc && suggestion.quality_score != null && (suggestion.quality_flags || []).length
         ? `<div class="text-xs text-slate-500">Quality flags: ${escapeHtml((suggestion.quality_flags || []).join(", "))}</div>`
         : "";
+    const updateHint = suggestion.update_type
+      ? `<div class="text-xs text-amber-700"><strong>${escapeHtml(suggestion.update_type === "contradiction" ? "Possible contradiction" : "Possible update")}:</strong> ${escapeHtml(suggestion.update_reason || "")}${suggestion.update_target ? ` Target: <code>${escapeHtml(suggestion.update_target)}</code>` : ""}</div>`
+      : "";
     const appendControls =
       suggestion.append_target && !suggestion.is_moc
         ? `<div class="space-y-2 rounded-lg border bg-white p-3">
@@ -802,6 +890,7 @@ function renderSuggestionsPage() {
       ${overlapHint}
       ${duplicateHint}
       ${qualityHint}
+      ${updateHint}
       ${appendSectionHint}
       ${appendControls}
       <details class="note-diff-details rounded-lg border bg-white p-3" open>
@@ -1097,6 +1186,7 @@ function renderGraph(graphData) {
 }
 
 function renderResult(result) {
+  latestAnalysisResult = result;
   resultsSection.classList.remove("hidden");
 
   const verdict = result.novelty.verdict;
@@ -1131,6 +1221,7 @@ function syncSourceInputs() {
 function clearAnalysisResults() {
   resultsSection.classList.add("hidden");
   currentSuggestions = [];
+  latestAnalysisResult = null;
   currentPage = 1;
   applyMessage.textContent = "";
   renderWarnings([]);
@@ -1239,6 +1330,10 @@ async function runAnalysis({ resume = false } = {}) {
       analyzeError.textContent = "Analysis canceled. No results from the canceled run are shown.";
     } else {
       analyzeError.textContent = error.message;
+      if (/matching interrupted run|checkpoint|source.*match/i.test(error.message)) {
+        analyzeError.textContent +=
+          " Use Recover last saved notes to inspect the checkpoint, or click Analyze to start a fresh run.";
+      }
     }
     analyzeError.classList.remove("hidden");
     analyzeError.focus?.();
@@ -1455,7 +1550,11 @@ writeAllBtn.addEventListener("click", async () => {
     let result = await fetchJson("/api/suggestions/apply-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ notes, vault_path: vaultPath }),
+      body: JSON.stringify({
+        notes,
+        vault_path: vaultPath,
+        source_title: latestAnalysisResult?.source?.title || null,
+      }),
     });
 
     const existing = result.skipped_existing || [];
@@ -1473,7 +1572,11 @@ writeAllBtn.addEventListener("click", async () => {
         const overwriteResult = await fetchJson("/api/suggestions/apply-batch", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ notes: retry, vault_path: vaultPath }),
+          body: JSON.stringify({
+            notes: retry,
+            vault_path: vaultPath,
+            source_title: latestAnalysisResult?.source?.title || null,
+          }),
         });
         result = {
           ...overwriteResult,
@@ -1588,6 +1691,141 @@ graphExportPng.addEventListener("click", () => {
   }, "image/png");
 });
 
+vaultChatForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const question = vaultChatQuestion.value.trim();
+  if (!question) return;
+  vaultChatBtn.disabled = true;
+  vaultChatMessage.textContent = "Retrieving vault context…";
+  vaultChatAnswer.classList.add("hidden");
+  vaultChatCitations.innerHTML = "";
+  try {
+    let answer = "";
+    let citations = [];
+    await streamNdjson(
+      "/api/chat",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          vault_path: vaultPathInput.value.trim() || null,
+        }),
+      },
+      (item) => {
+        if (item.type === "answer") answer += item.text || "";
+        if (item.type === "citations") citations = item.citations || [];
+      }
+    );
+    vaultChatAnswer.textContent = answer;
+    vaultChatAnswer.classList.remove("hidden");
+    vaultChatCitations.innerHTML = citations
+      .map((item) => `<li>[${item.id}] <code>${escapeHtml(item.note_path)}</code>${item.heading ? ` · ${escapeHtml(item.heading)}` : ""} (${item.score})</li>`)
+      .join("");
+    vaultChatMessage.textContent = `${citations.length} source passage${citations.length === 1 ? "" : "s"} retrieved.`;
+  } catch (error) {
+    vaultChatMessage.textContent = error.message;
+  } finally {
+    vaultChatBtn.disabled = false;
+  }
+});
+
+async function loadAnalytics() {
+  try {
+    const data = await fetchJson("/api/analytics");
+    const totals = data.totals || {};
+    analyticsTotals.innerHTML = `
+      <div class="rounded-lg bg-slate-50 p-3"><div class="text-slate-500">Sources analyzed</div><div class="text-2xl font-semibold">${Number(totals.analyzed_sources || 0)}</div></div>
+      <div class="rounded-lg bg-slate-50 p-3"><div class="text-slate-500">Notes written</div><div class="text-2xl font-semibold">${Number(totals.written_notes || 0)}</div></div>`;
+    const days = Object.entries(data.days || {}).sort(([a], [b]) => a.localeCompare(b)).slice(-14);
+    const maximum = Math.max(1, ...days.map(([, item]) => Number(item.analyzed_sources || 0) + Number(item.written_notes || 0)));
+    analyticsBars.innerHTML = days.map(([day, item]) => {
+      const count = Number(item.analyzed_sources || 0) + Number(item.written_notes || 0);
+      return `<div class="flex items-center gap-2 text-xs"><span class="w-24">${escapeHtml(day)}</span><div class="h-3 bg-indigo-500 rounded" style="width:${Math.max(2, (count / maximum) * 75)}%"></div><span>${count}</span></div>`;
+    }).join("") || '<p class="text-sm text-slate-500">No activity recorded yet.</p>';
+  } catch (error) {
+    analyticsTotals.textContent = error.message;
+  }
+}
+
+refreshAnalyticsBtn.addEventListener("click", loadAnalytics);
+
+async function exportAnalysisReport(format) {
+  if (!latestAnalysisResult) return;
+  const options = {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      result: latestAnalysisResult,
+      format,
+      title: `${latestAnalysisResult.source?.title || "Actualizer"} — analysis report`,
+    }),
+  };
+  let response = await fetch("/api/reports/export", withAuthHeaders(options));
+  if (response.status === 401) {
+    setApiToken("");
+    await ensureApiToken(true);
+    response = await fetch("/api/reports/export", withAuthHeaders(options));
+  }
+  if (!response.ok) throw new Error(await response.text());
+  const blob = await response.blob();
+  downloadBlob(
+    blob,
+    `actualizer-report.${format === "html" ? "html" : "md"}`
+  );
+}
+
+exportReportMd.addEventListener("click", () => {
+  exportAnalysisReport("markdown").catch((error) => {
+    applyMessage.textContent = `Report export failed: ${error.message}`;
+  });
+});
+exportReportHtml.addEventListener("click", () => {
+  exportAnalysisReport("html").catch((error) => {
+    applyMessage.textContent = `Report export failed: ${error.message}`;
+  });
+});
+
+function setTheme(dark) {
+  document.documentElement.classList.toggle("dark", dark);
+  themeToggle.textContent = dark ? "Light mode" : "Dark mode";
+  localStorage.setItem("actualizer_theme", dark ? "dark" : "light");
+}
+
+themeToggle.addEventListener("click", () => {
+  setTheme(!document.documentElement.classList.contains("dark"));
+});
+setTheme(
+  localStorage.getItem("actualizer_theme") === "dark" ||
+    (!localStorage.getItem("actualizer_theme") &&
+      window.matchMedia?.("(prefers-color-scheme: dark)").matches)
+);
+
+["dragenter", "dragover"].forEach((name) => {
+  analyzeDropZone.addEventListener(name, (event) => {
+    event.preventDefault();
+    analyzeDropZone.classList.add("drop-active");
+  });
+});
+["dragleave", "drop"].forEach((name) => {
+  analyzeDropZone.addEventListener(name, (event) => {
+    event.preventDefault();
+    analyzeDropZone.classList.remove("drop-active");
+  });
+});
+analyzeDropZone.addEventListener("drop", (event) => {
+  const file = event.dataTransfer?.files?.[0];
+  if (!file) return;
+  const transfer = new DataTransfer();
+  transfer.items.add(file);
+  sourceFileInput.files = transfer.files;
+  sourceUrlInput.value = "";
+  syncSourceInputs();
+  analyzeError.textContent = `Ready to analyze dropped file: ${file.name}`;
+  analyzeError.className = "text-sm text-slate-600";
+});
+
 syncSourceInputs();
 loadStatus();
+loadAnalytics();
 refreshResumeState();

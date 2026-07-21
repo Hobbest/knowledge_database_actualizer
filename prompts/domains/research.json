@@ -1,0 +1,8 @@
+{
+  "name": "research",
+  "rules": [
+    "Distinguish findings, methods, limitations, and author interpretation",
+    "Preserve reported uncertainty, effect sizes, and study population details",
+    "Do not turn correlation into causation"
+  ]
+}

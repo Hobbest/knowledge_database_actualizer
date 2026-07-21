@@ -1,0 +1,2 @@
+# Optional local audio/video transcription support.
+faster-whisper==1.2.1

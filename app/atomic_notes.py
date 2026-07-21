@@ -20,7 +20,7 @@ from app.text_utils import (
     title_from_text,
     truncate_with_ellipsis,
 )
-from app.vectorstore import VectorStore
+from app.vector_protocol import VectorStoreProtocol as VectorStore
 
 # Re-export for callers that imported the private helper from this module.
 _extract_json_array = extract_json_array

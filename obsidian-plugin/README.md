@@ -26,6 +26,7 @@ Thin client for the Knowledge Database Actualizer API. Keeps the Python server a
 | Recover saved notes | Loads the latest checkpoint without re-analyzing |
 | Continue interrupted run | Resumes drafting with `resume=true` (same source as last analyze) |
 | Cancel analysis | Aborts the in-flight analyze stream (same as the sidebar Cancel button) |
+| Insert first selected suggestion at cursor | Inserts a reviewed draft into the active editor without leaving the note |
 | Open Actualizer sidebar | Shows verdict, overlaps, and proposed notes |
 
 ## Sidebar workflow
@@ -37,6 +38,7 @@ The sidebar mirrors the web UI essentials:
 - **Overlapping vault notes** with similarity, heading, and excerpt
 - **Paginated proposed notes** (5 / 10 / 25 / 50 / All) so large PDF runs stay usable in the sidebar
 - **Editable vault path and note content** before write
+- **Insert at cursor** on each suggestion for an inline editing workflow
 - **Append vs new file** when a topic matches an existing note
 - **Exact merged-note preview** via `POST /api/suggestions/preview`
 - **Write selected** via `/api/suggestions/apply-batch`, including server backups, atomic writes,
