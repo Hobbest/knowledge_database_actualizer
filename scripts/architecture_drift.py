@@ -61,6 +61,7 @@ CURATED_MODULES = frozenset(
         "summarize",
         "threshold_calibration",
         "thresholds",
+        "titling",
         "update_detection",
         "url_security",
         "vault",

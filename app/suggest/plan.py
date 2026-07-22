@@ -23,6 +23,7 @@ from app.source_identity import normalize_source_key
 from app.sources.base import LoadedSource, SourceSegment
 from app.suggest.models import ProgressFn
 from app.text_utils import combine_segment_text, extract_topic_summary
+from app.titling import TITLE_ALGORITHM_VERSION
 from app.vector_protocol import VectorStoreProtocol as VectorStore
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,8 @@ def analysis_fingerprint(source: LoadedSource) -> str:
         "max_notes_per_source": settings.max_notes_per_source,
         "atomic_note_line_limit": settings.atomic_note_line_limit,
         "atomic_note_char_limit": settings.atomic_note_char_limit,
+        # Invalidate reused checkpoint plans when body-grounded titling changes.
+        "title_algorithm_version": TITLE_ALGORITHM_VERSION,
     }
     payload = json.dumps(shaping_settings, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256()

@@ -17,6 +17,7 @@ from app.atomic_notes import (
 from app.novelty import NoveltyResult, Verdict
 from app.prompts import TOPIC_PLANNING_RULES, topic_planning_prompt
 from app.sources.base import LoadedSource, SourceLocation, SourceSegment
+from app.suggest.plan import analysis_fingerprint
 from app.text_limits import TEXT_LIMITS
 
 
@@ -222,3 +223,15 @@ def test_llm_plan_topics_repairs_weak_titles(monkeypatch):
     title = topics[0].title.casefold()
     assert "batch" in title or "normalization" in title or "covariate" in title
     assert "…" not in topics[0].title and "..." not in topics[0].title
+
+
+def test_analysis_fingerprint_changes_with_title_algorithm_version(monkeypatch):
+    source = LoadedSource(
+        title="Src",
+        text="Stable source body for fingerprinting.",
+        source_type="text",
+        source_ref="a.txt",
+    )
+    baseline = analysis_fingerprint(source)
+    monkeypatch.setattr("app.suggest.plan.TITLE_ALGORITHM_VERSION", "999-test")
+    assert analysis_fingerprint(source) != baseline

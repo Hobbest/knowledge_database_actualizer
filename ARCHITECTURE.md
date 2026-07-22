@@ -41,6 +41,7 @@ flowchart TB
         SEG["segmentation.py"]
         REL["relevance.py"]
         ATOM["atomic_notes.py"]
+        TITLE["titling.py<br/>body-grounded titles"]
         OUT["note_output.py<br/>paths · templates · append"]
         SUG["suggest.py<br/>draft · apply · MOC"]
         BLK["block_refs.py"]
@@ -62,7 +63,7 @@ flowchart TB
     API --> RT
     API --> SRC & VLT & NOV & SUG & GR & META & THR
     SUG --> ATOM & OUT & OBS & BLK & BUD & LLM & CK
-    ATOM --> SEG & REL
+    ATOM --> SEG & REL & TITLE
     NOV --> VS & SIM & THR
     VS --> EMB & CHROMA
     VLT --> VAULT
@@ -152,6 +153,7 @@ app/
 ├── relevance.py              Boilerplate / ToC / link-dump filters
 ├── media.py                  Tables & figure captions → notes
 ├── atomic_notes.py           Topic planning (structural + optional LLM); segment scoring
+├── titling.py                Body-grounded topic titles (planning-time; no extra LLM)
 ├── summarize.py              Extractive fallback drafting helpers
 ├── suggest/                  Draft · plan · apply package (stable `app.suggest` façade)
 ├── llm.py                    Providers + rate-limit retry helpers (+ plugins)
@@ -171,7 +173,7 @@ scripts/smoke_test.py       Optional integration (real MiniLM)
 |---------|---------|
 | Ingestion | `sources`, `source_identity`, `vault`, `wikilinks`, `chunking`, `url_security` |
 | Retrieval & judgement | `embeddings`, `vectorstore`, `qdrant_store`, `vector_protocol`, `indexing`, `similarity`, `novelty`, `thresholds`, `threshold_calibration`, `index_meta`, `vault_fingerprints`, `vault_index` |
-| Note generation | `segmentation`, `relevance`, `media`, `atomic_notes`, `summarize`, `note_output`, `suggest`, `note_intelligence`, `llm`, `llm_budget`, `prompt_domains`, `json_extract` |
+| Note generation | `segmentation`, `relevance`, `media`, `atomic_notes`, `titling`, `summarize`, `note_output`, `suggest`, `note_intelligence`, `llm`, `llm_budget`, `prompt_domains`, `json_extract` |
 | Obsidian integration | `obsidian_uri`, `obsidian_templates`, `note_output`, `block_refs`, `wikilinks`, `git_integration` |
 | HTTP & ops | `main`, `api`, `observability`, `analytics`, `chat`, `reports`, `vault_watcher`, `plugin_api`, `preflight`, `settings_persistence` |
 | Concurrency & durability | `runtime`, `checkpoint` |

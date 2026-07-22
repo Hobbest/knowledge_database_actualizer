@@ -74,6 +74,22 @@ def title_body_coherence(title: str, body: str) -> float:
     return len(overlap) / len(union)
 
 
+def title_is_grounded(title: str, body: str) -> bool:
+    """True when most title content words appear in ``body`` (asymmetric coverage).
+
+    Prefer this over :func:`title_body_coherence` for quality flags: short concept
+    titles against long notes score poorly under symmetric Jaccard.
+    """
+    title_words = set(_content_words(title or ""))
+    body_words = set(_content_words(body or ""))
+    if not title_words or not body_words:
+        return False
+    coverage = len(title_words & body_words) / len(title_words)
+    if coverage >= 0.5:
+        return True
+    return title_body_coherence(title, body) >= TEXT_LIMITS.title_coherence_floor
+
+
 def _word_count(text: str) -> int:
     return len(re.findall(r"[A-Za-z0-9']+", text or ""))
 
@@ -330,4 +346,5 @@ __all__ = [
     "disambiguate_titles",
     "refine_topic_title",
     "title_body_coherence",
+    "title_is_grounded",
 ]

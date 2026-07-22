@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 
 from app.config import settings
+from app.titling import title_is_grounded
 from app.vector_protocol import VectorStoreProtocol as VectorStore
 
 
@@ -122,6 +123,11 @@ def score_note_quality(*, concept_title: str, content: str, is_moc: bool = False
         points += 1.0
     else:
         flags.append("weak_definition")
+
+    # H1 is forced to match concept_title during draft, so ground against body
+    # prose only — not the heading line.
+    if title and not title_is_grounded(title, prose):
+        flags.append("title_ungrounded")
 
     bullet_count = len(re.findall(r"^[ \t]*[-*+]\s+\S", body, re.MULTILINE))
     if 2 <= bullet_count <= 12:

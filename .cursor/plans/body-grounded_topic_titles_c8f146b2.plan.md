@@ -13,10 +13,10 @@ todos:
     status: completed
   - id: fingerprint-quality
     content: "Phase 3: Bump analysis_fingerprint with title_algorithm_version; optional note_intelligence title_ungrounded flag"
-    status: pending
+    status: completed
   - id: tests
     content: tests/test_titling.py goldens + planning mock repair + update test_concept_alignment / smoke as needed
-    status: pending
+    status: completed
 isProject: false
 ---
 

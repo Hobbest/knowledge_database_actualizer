@@ -33,6 +33,7 @@ from app.sources import SourceDispatcher
 from app.sources.base import LoadedSource, MediaItem, SourceLocation, SourceSegment
 from app.suggest import apply_suggestions, draft_note_suggestions, iter_note_suggestions
 from app.summarize import compose_title, key_points, refine_note_body, summarize_text
+from app.titling import refine_topic_title
 from app.text_utils import clean_extractive_text
 from app.vectorstore import VectorStore
 
@@ -275,6 +276,9 @@ It handles dependencies, builds, tests, and publishing crates.
         "A learning rate that is too large can cause divergence. "
         "Gradient descent is widely used to train neural networks."
     )
+    grounded = refine_topic_title(article, hint="See figure")
+    assert "gradient" in grounded.casefold() or "descent" in grounded.casefold()
+    assert "see figure" not in grounded.casefold()
     summary = summarize_text(article, max_sentences=2)
     assert 0 < len(summary) < len(article)
     assert summary.count(".") <= 2

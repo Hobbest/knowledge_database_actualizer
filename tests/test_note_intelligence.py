@@ -69,11 +69,29 @@ def test_score_note_quality_rewards_structure():
     )
     assert good["quality_score"] is not None
     assert good["quality_score"] >= 0.8
+    assert "title_ungrounded" not in good["quality_flags"]
 
     weak = score_note_quality(concept_title="Concept", content="# Wrong\n\nshort\n")
     assert weak["quality_score"] is not None
     assert weak["quality_score"] < good["quality_score"]
     assert "heading_mismatch" in weak["quality_flags"]
+
+
+def test_score_note_quality_flags_title_ungrounded():
+    """H1 match alone is not enough — body prose must ground the title."""
+    result = score_note_quality(
+        concept_title="Momentum Accumulation",
+        content=(
+            "---\ntype: atomic\n---\n"
+            "# Momentum Accumulation\n\n"
+            "A precise definition of astronomy and distant galaxies for the vault.\n\n"
+            "- Point one about stars\n- Point two about nebulae\n- Point three\n\n"
+            "## Related notes\n\n- [[topics/Other]]\n\n"
+            "## Source\n\n- File: `a.md`\n"
+        ),
+    )
+    assert "heading_mismatch" not in result["quality_flags"]
+    assert "title_ungrounded" in result["quality_flags"]
 
 
 def test_detect_duplicates_marks_near_copies(monkeypatch):

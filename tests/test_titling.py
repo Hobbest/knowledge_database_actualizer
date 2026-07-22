@@ -8,6 +8,7 @@ from app.titling import (
     disambiguate_titles,
     refine_topic_title,
     title_body_coherence,
+    title_is_grounded,
 )
 
 
@@ -83,6 +84,15 @@ def test_title_body_coherence_scores_overlap():
     body = "Cosine similarity measures the angle between embedding vectors."
     assert title_body_coherence("Cosine similarity", body) > 0.2
     assert title_body_coherence("Unrelated astronomy facts", body) < 0.15
+
+
+def test_title_is_grounded_uses_asymmetric_coverage():
+    long_body = (
+        "A precise definition of the concept for the vault. "
+        "Additional details expand on usage, trade-offs, and related ideas."
+    )
+    assert title_is_grounded("Concept", long_body)
+    assert not title_is_grounded("Momentum Accumulation", long_body)
 
 
 def test_disambiguate_titles_only_suffixes_collisions():
