@@ -4,10 +4,10 @@ overview: Replace first-line / inherited-heading topic titling with a body-groun
 todos:
   - id: titling-module
     content: "Phase 0: Add app/titling.py (concept_title_from_body, coherence gate, TITLE_ALGORITHM_VERSION) + TextLimits knobs; unit goldens only"
-    status: pending
+    status: completed
   - id: structural-wire
     content: "Phase 1: Chokepoint refine_topic_title in atomic_notes; always title splits from body; disambiguate_titles for collisions; invert part-1 tests"
-    status: pending
+    status: completed
   - id: llm-title-repair
     content: "Phase 2: Tighten TOPIC_PLANNING_RULES and repair weak LLM titles post-parse via same gate"
     status: pending

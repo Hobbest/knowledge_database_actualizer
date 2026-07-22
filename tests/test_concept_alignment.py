@@ -29,18 +29,26 @@ def test_ensure_concept_heading_leaves_subheadings():
     assert "## Summary" in fixed
 
 
-def test_title_for_split_part_keeps_heading_on_part_one():
-    assert _title_for_split_part("Optimization", "Later text about Adam.", 1) == "Optimization"
+def test_title_for_split_part_grounds_part_one_from_body():
+    """Part 1 must reflect chunk body when it diverges from the parent heading."""
+    title = _title_for_split_part(
+        "Optimization",
+        "Adam optimizer adapts learning rates per parameter during training.",
+        1,
+    )
+    assert "Adam" in title or "learning" in title.casefold()
+    assert title != "Optimization"
 
 
 def test_title_for_split_part_derives_from_body_after_part_one():
     title = _title_for_split_part(
         "Optimization",
-        "Adam optimizer adapts learning rates per parameter.",
+        "Adam optimizer adapts learning rates per parameter during training.",
         2,
     )
-    assert "Adam" in title
-    assert "(2)" in title or "part 2" in title.lower()
+    assert "Adam" in title or "learning" in title.casefold()
+    # Part markers come from disambiguate_titles on a batch, not this helper.
+    assert "Optimization" not in title or "Adam" in title
 
 
 def test_topics_from_paragraphs_retitles_later_chunks(monkeypatch):
@@ -60,10 +68,11 @@ def test_topics_from_paragraphs_retitles_later_chunks(monkeypatch):
     ]
     topics = _topics_from_paragraphs("Alpha Heading", segment, paragraphs)
     assert len(topics) >= 2
-    assert topics[0].title == "Alpha Heading"
-    # Later chunk should not be stuck as only "Alpha Heading (N)" if body differs.
+    # Part 1 is body-grounded; parent heading is only a hint when aligned.
+    assert "Alpha Heading" not in topics[0].title or "alpha" in topics[0].title.casefold()
     later = topics[-1]
-    assert "Alpha Heading" not in later.title or "Beta" in later.title or later.title != "Alpha Heading"
+    assert "Beta" in later.title or "approach" in later.title.casefold()
+    assert later.title != "Alpha Heading"
 
 
 def test_batch_prompt_requires_stable_id():

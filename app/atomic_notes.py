@@ -12,14 +12,13 @@ from app.llm import call_with_retry, complete_with_usage, get_llm_provider
 from app.novelty import NoveltyResult
 from app.prompts import ARCHITECT_SYSTEM_PROMPT, topic_planning_prompt
 from app.sources.base import LoadedSource, SourceLocation, SourceSegment, merge_locations
-from app.summarize import compose_title
 from app.text_limits import TEXT_LIMITS
 from app.text_utils import (
     combine_segment_text,
     extract_topic_summary,
-    title_from_text,
     truncate_with_ellipsis,
 )
+from app.titling import disambiguate_titles, refine_topic_title
 from app.vector_protocol import VectorStoreProtocol as VectorStore
 
 # Re-export for callers that imported the private helper from this module.
@@ -27,18 +26,19 @@ _extract_json_array = extract_json_array
 
 
 def _title_for_split_part(base_title: str, body: str, part: int) -> str:
-    """Title a structural chunk; re-derive from body text after part 1."""
-    if part <= 1:
-        return base_title
-    derived = title_from_text(body)
-    composed = compose_title(derived)
-    base = compose_title(base_title)
-    if not composed or composed == "Untitled concept":
-        return f"{base_title} ({part})"
-    if composed.casefold() == base.casefold():
-        return f"{base_title} ({part})"
-    # Keep a part marker so paths stay unique when titles collide.
-    return f"{composed} ({part})"
+    """Title a structural chunk from its body (``part`` kept for call-site compat)."""
+    del part  # Collision suffixes are applied later via disambiguate_titles.
+    return refine_topic_title(body, hint=base_title or None)
+
+
+def _disambiguate_topic_batch(topics: list[AtomicTopic]) -> list[AtomicTopic]:
+    """Apply path-uniqueness suffixes after each chunk is body-grounded."""
+    if len(topics) <= 1:
+        return topics
+    unique = disambiguate_titles([topic.title for topic in topics])
+    for topic, title in zip(topics, unique, strict=True):
+        topic.title = title
+    return topics
 
 if TYPE_CHECKING:
     from app.llm_budget import LLMBudget
@@ -161,10 +161,13 @@ def _minimum_topic_count(segment_count: int, structural_count: int) -> int:
 
 def _atomic_topic(title: str, segment: SourceSegment, body: str) -> AtomicTopic:
     cleaned = body.strip()
+    grounded = refine_topic_title(cleaned, hint=title.strip() or None)
     return AtomicTopic(
-        title=title.strip() or "Untitled concept",
+        title=grounded,
         segments=[SourceSegment(text=cleaned, location=segment.location, index=segment.index)],
-        summary=extract_topic_summary([SourceSegment(text=cleaned, location=segment.location, index=segment.index)]),
+        summary=extract_topic_summary(
+            [SourceSegment(text=cleaned, location=segment.location, index=segment.index)]
+        ),
     )
 
 
@@ -180,7 +183,7 @@ def _structural_plan_topics(segments: list[SourceSegment]) -> list[AtomicTopic]:
     topics: list[AtomicTopic] = []
     for segment in segments:
         topics.extend(_split_segment_into_atomic_topics(segment))
-    return _dedupe_topics(topics)
+    return _dedupe_topics(_disambiguate_topic_batch(topics))
 
 
 def _split_segment_into_atomic_topics(segment: SourceSegment) -> list[AtomicTopic]:
@@ -209,10 +212,12 @@ def _split_oversized_topic(topic: AtomicTopic) -> list[AtomicTopic]:
 
     midpoint = max(1, len(text) // 2)
     segment = topic.segments[0]
-    return [
-        _atomic_topic(f"{topic.title} (part 1)", segment, text[:midpoint]),
-        _atomic_topic(f"{topic.title} (part 2)", segment, text[midpoint:]),
-    ]
+    return _disambiguate_topic_batch(
+        [
+            _atomic_topic(topic.title, segment, text[:midpoint]),
+            _atomic_topic(topic.title, segment, text[midpoint:]),
+        ]
+    )
 
 
 def _topics_from_paragraphs(
@@ -231,7 +236,6 @@ def _topics_from_paragraphs(
         if not chunk:
             return
         body = "\n\n".join(chunk).strip()
-        # Part 1 keeps the section heading; later parts re-title from chunk text.
         title = _title_for_split_part(base_title, body, part)
         topics.append(_atomic_topic(title, segment, body))
         part += 1
@@ -246,7 +250,7 @@ def _topics_from_paragraphs(
         chunk_lines += paragraph_lines
 
     flush()
-    return topics
+    return _disambiguate_topic_batch(topics)
 
 
 def _topics_from_sentence_groups(
@@ -278,18 +282,18 @@ def _topics_from_sentence_groups(
         group_chars += len(sentence) + 1
 
     flush()
-    return topics
+    return _disambiguate_topic_batch(topics)
 
 
 def _split_segment_by_heading(segment: SourceSegment) -> list[AtomicTopic]:
     matches = list(HEADING_PATTERN.finditer(segment.text))
     if not matches:
-        return [_atomic_topic(title_from_text(segment.text), segment, segment.text)]
+        return [_atomic_topic("", segment, segment.text)]
 
     topics: list[AtomicTopic] = []
     preamble = segment.text[: matches[0].start()].strip()
     if preamble:
-        topics.append(_atomic_topic(title_from_text(preamble), segment, preamble))
+        topics.append(_atomic_topic("", segment, preamble))
 
     for idx, match in enumerate(matches):
         title = match.group(1).strip()
@@ -299,7 +303,7 @@ def _split_segment_by_heading(segment: SourceSegment) -> list[AtomicTopic]:
         if body:
             topics.append(_atomic_topic(title, segment, body))
 
-    return topics or [_atomic_topic(title_from_text(segment.text), segment, segment.text)]
+    return topics or [_atomic_topic("", segment, segment.text)]
 
 
 def _dedupe_topics(topics: list[AtomicTopic]) -> list[AtomicTopic]:
