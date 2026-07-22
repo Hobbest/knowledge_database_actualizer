@@ -10,7 +10,7 @@ todos:
     status: completed
   - id: llm-title-repair
     content: "Phase 2: Tighten TOPIC_PLANNING_RULES and repair weak LLM titles post-parse via same gate"
-    status: pending
+    status: completed
   - id: fingerprint-quality
     content: "Phase 3: Bump analysis_fingerprint with title_algorithm_version; optional note_intelligence title_ungrounded flag"
     status: pending

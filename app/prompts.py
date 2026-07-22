@@ -45,6 +45,12 @@ TOPIC_PLANNING_RULES = (
     "Prefer more smaller notes over fewer large notes",
     f"Keep summaries compact (no more than {TEXT_LIMITS.llm_planning_summary_words} words)",
     "Be precise and specific; avoid generic summaries",
+    "Write the summary first mentally; the title must name the single concept that summary explains",
+    (
+        f"Title must be a noun phrase naming one concept "
+        f"({TEXT_LIMITS.title_min_words}–{TEXT_LIMITS.title_max_words} words)"
+    ),
+    "Do not use sentence fragments, ellipses, or trailing page numbers in titles",
 )
 
 UNTRUSTED_OPEN = "<<<UNTRUSTED_SOURCE>>>"
@@ -96,9 +102,12 @@ def topic_planning_prompt(
         "Return ONLY a valid JSON array. The first character of the response must be '['.\n"
         "No preamble, markdown fences, or commentary before or after the array.\n"
         "Each item must have:\n"
-        '- "title": short concept title (one concept only)\n'
+        '- "title": noun-phrase concept name '
+        f"({TEXT_LIMITS.title_min_words}–{TEXT_LIMITS.title_max_words} words); "
+        "one concept only; not a sentence fragment; no page numbers or ellipsis\n"
         '- "segment_indices": list of segment index integers to include\n'
-        '- "summary": compact 2-5 sentence explanation of the single concept\n\n'
+        '- "summary": compact 2-5 sentence explanation of the single concept '
+        "(title must be entailed by this summary)\n\n"
         "Rules:\n"
         f"{_format_rules(_domain_rules(TOPIC_PLANNING_RULES))}\n"
     )

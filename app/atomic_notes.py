@@ -18,7 +18,9 @@ from app.text_utils import (
     extract_topic_summary,
     truncate_with_ellipsis,
 )
-from app.titling import disambiguate_titles, refine_topic_title
+from app.relevance import is_boilerplate_title
+from app.summarize import compose_title
+from app.titling import disambiguate_titles, refine_topic_title, title_body_coherence
 from app.vector_protocol import VectorStoreProtocol as VectorStore
 
 # Re-export for callers that imported the private helper from this module.
@@ -39,6 +41,28 @@ def _disambiguate_topic_batch(topics: list[AtomicTopic]) -> list[AtomicTopic]:
     for topic, title in zip(topics, unique, strict=True):
         topic.title = title
     return topics
+
+
+def _ground_llm_topic_title(
+    title: str,
+    *,
+    summary: str,
+    segments: list[SourceSegment],
+) -> str:
+    """Keep a coherent LLM title; otherwise repair extractively from segment text."""
+    cleaned = (title or "").strip() or "Untitled concept"
+    body = combine_segment_text(segments).strip()
+    gate_text = (summary or "").strip() or body
+    coherent = (
+        title_body_coherence(cleaned, gate_text) >= TEXT_LIMITS.title_coherence_floor
+        and not is_boilerplate_title(cleaned)
+    )
+    if coherent and body:
+        # Also require some overlap with the excerpt so a fluent-but-wrong title
+        # paired with a matching wrong summary still gets repaired.
+        if title_body_coherence(cleaned, body) >= TEXT_LIMITS.title_coherence_floor:
+            return compose_title(cleaned)
+    return refine_topic_title(body, hint=cleaned)
 
 if TYPE_CHECKING:
     from app.llm_budget import LLMBudget
@@ -396,20 +420,28 @@ def _llm_plan_topics(
         by_index = {segment.index: segment for segment in segments}
         topics: list[AtomicTopic] = []
         for item in payload:
-            title = str(item.get("title", "")).strip() or "Untitled concept"
+            raw_title = str(item.get("title", "")).strip() or "Untitled concept"
             indices = item.get("segment_indices") or []
             matched_segments = [by_index[idx] for idx in indices if idx in by_index]
             if not matched_segments:
                 continue
             llm_summary = str(item.get("summary", "")).strip()
+            summary = llm_summary or extract_topic_summary(matched_segments)
+            title = _ground_llm_topic_title(
+                raw_title,
+                summary=summary,
+                segments=matched_segments,
+            )
             topics.append(
                 AtomicTopic(
                     title=title,
                     segments=matched_segments,
-                    summary=llm_summary or extract_topic_summary(matched_segments),
+                    summary=summary,
                 )
             )
-        return topics or None
+        if not topics:
+            return None
+        return _disambiguate_topic_batch(topics)
     except Exception as exc:  # noqa: BLE001 - structural planning is the fallback
         logger.warning("LLM topic planning failed: %s", exc)
         return None

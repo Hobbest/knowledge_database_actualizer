@@ -7,12 +7,15 @@ import re
 from app.atomic_notes import (
     AtomicTopic,
     SegmentNovelty,
+    _ground_llm_topic_title,
+    _llm_plan_topics,
     _plan_windows,
     _reconcile_topics,
     _structural_plan_topics,
     plan_atomic_topics,
 )
 from app.novelty import NoveltyResult, Verdict
+from app.prompts import TOPIC_PLANNING_RULES, topic_planning_prompt
 from app.sources.base import LoadedSource, SourceLocation, SourceSegment
 from app.text_limits import TEXT_LIMITS
 
@@ -139,3 +142,83 @@ def test_planning_call_cap_limits_llm_windows(monkeypatch):
     assert provider.calls == 1
     covered = {segment.index for topic in topics for segment in topic.segments}
     assert covered == {0, 1, 2, 3}
+
+
+def test_topic_planning_prompt_requires_grounded_noun_phrase_titles():
+    source = LoadedSource(title="Src", text="body", source_type="text", source_ref="a.txt")
+    prompt = topic_planning_prompt(
+        source=source,
+        segment_outline=[{"index": 0, "location": "p.1", "text": "hello"}],
+        target_min_notes=1,
+        novelty=_novelty(),
+    )
+    assert "noun-phrase concept name" in prompt
+    assert "entailed by this summary" in prompt
+    joined = " ".join(TOPIC_PLANNING_RULES)
+    assert "noun phrase" in joined.casefold()
+    assert "sentence fragments" in joined.casefold()
+
+
+def test_ground_llm_topic_title_repairs_ungrounded_title():
+    segment = SourceSegment(
+        text=(
+            "Momentum accumulates a velocity vector from past gradients. "
+            "It dampens oscillations and accelerates descent in consistent directions."
+        ),
+        location=SourceLocation(page=1),
+        index=0,
+    )
+    repaired = _ground_llm_topic_title(
+        "Miscellaneous remarks about nothing important",
+        summary="Unrelated astronomy facts about distant galaxies.",
+        segments=[segment],
+    )
+    assert "momentum" in repaired.casefold() or "velocity" in repaired.casefold()
+    assert "astronomy" not in repaired.casefold()
+    assert "miscellaneous" not in repaired.casefold()
+
+
+def test_ground_llm_topic_title_keeps_coherent_title():
+    segment = SourceSegment(
+        text=(
+            "Momentum accumulates a velocity vector from past gradients. "
+            "It dampens oscillations during steepest descent."
+        ),
+        location=SourceLocation(page=1),
+        index=0,
+    )
+    kept = _ground_llm_topic_title(
+        "Momentum Velocity Accumulation",
+        summary="Momentum accumulates velocity from past gradients to dampen oscillations.",
+        segments=[segment],
+    )
+    assert "momentum" in kept.casefold()
+
+
+def test_llm_plan_topics_repairs_weak_titles(monkeypatch):
+    body = (
+        "Batch normalization renormalizes layer activations using mini-batch statistics. "
+        "It reduces internal covariate shift during deep network training."
+    )
+    segment = SourceSegment(text=body, location=SourceLocation(page=1), index=0)
+
+    class PlanningProvider:
+        def complete(self, prompt, *, system=None, json_mode=False):
+            return json.dumps(
+                [
+                    {
+                        "title": "When the activations are too large for…",
+                        "segment_indices": [0],
+                        "summary": "A vague note that never names the method.",
+                    }
+                ]
+            )
+
+    monkeypatch.setattr("app.atomic_notes.get_llm_provider", lambda: PlanningProvider())
+    source = LoadedSource(title="Src", text=body, source_type="text", source_ref="a.txt")
+    topics = _llm_plan_topics(source, [segment], _novelty())
+    assert topics is not None
+    assert len(topics) == 1
+    title = topics[0].title.casefold()
+    assert "batch" in title or "normalization" in title or "covariate" in title
+    assert "…" not in topics[0].title and "..." not in topics[0].title
