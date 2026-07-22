@@ -1,7 +1,38 @@
 from pathlib import Path
 
-from pydantic import model_validator
+from pydantic import BaseModel, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.auth import parse_api_token_capabilities
+
+
+class EmbeddingsSettings(BaseModel):
+    provider: str
+    model: str
+    device: str
+    backend: str
+    quantized: bool
+    api_key: str | None
+
+
+class VectorSettings(BaseModel):
+    backend: str
+    qdrant_url: str | None
+    qdrant_api_key: str | None
+    qdrant_collection: str
+    qdrant_vector_size: int
+
+
+class AuthSettings(BaseModel):
+    api_token: str | None
+    capabilities: frozenset[str]
+    bind_host: str
+    allowed_hosts: str
+
+
+class PluginSettings(BaseModel):
+    disable_discovery: bool
+    allowlist: frozenset[str]
 
 
 class Settings(BaseSettings):
@@ -188,6 +219,11 @@ class Settings(BaseSettings):
     # Authorization: Bearer <token> or X-API-Token: <token>.
     # Required when BIND_HOST is a non-loopback address (e.g. 0.0.0.0 in Docker).
     api_token: str | None = None
+    # Comma-separated capability names (read, analyze, write, admin, chat).
+    # Empty = token grants all capabilities (backward compatible).
+    api_token_capabilities: str = ""
+    disable_plugin_discovery: bool = False
+    plugin_allowlist: str = ""
 
     # Uvicorn bind address. Non-loopback values require API_TOKEN at startup.
     bind_host: str = "127.0.0.1"
@@ -302,6 +338,7 @@ class Settings(BaseSettings):
         if self.whisper_language is not None:
             self.whisper_language = self.whisper_language.strip() or None
         self.prompt_domain = self.prompt_domain.strip().lower()
+        parse_api_token_capabilities(self.api_token_capabilities)
         return self
 
     @property
@@ -362,6 +399,75 @@ class Settings(BaseSettings):
     @property
     def graph_cache_path(self) -> Path:
         return self.data_dir / "graph.json"
+
+    @property
+    def plugin_allowlist_set(self) -> frozenset[str]:
+        return frozenset(
+            name.strip()
+            for name in self.plugin_allowlist.split(",")
+            if name.strip()
+        )
+
+    @property
+    def api_token_capability_set(self) -> frozenset[str]:
+        return parse_api_token_capabilities(self.api_token_capabilities)
+
+    @property
+    def embeddings(self) -> EmbeddingsSettings:
+        return EmbeddingsSettings(
+            provider=self.embedding_provider,
+            model=self.embedding_model,
+            device=self.embedding_device,
+            backend=self.embedding_backend,
+            quantized=self.embedding_quantized,
+            api_key=self.embedding_api_key,
+        )
+
+    @property
+    def vector(self) -> VectorSettings:
+        return VectorSettings(
+            backend=self.vector_backend,
+            qdrant_url=self.qdrant_url,
+            qdrant_api_key=self.qdrant_api_key,
+            qdrant_collection=self.qdrant_collection,
+            qdrant_vector_size=self.qdrant_vector_size,
+        )
+
+    @property
+    def auth(self) -> AuthSettings:
+        return AuthSettings(
+            api_token=self.api_token,
+            capabilities=self.api_token_capability_set,
+            bind_host=self.bind_host,
+            allowed_hosts=self.allowed_hosts,
+        )
+
+    @property
+    def plugins(self) -> PluginSettings:
+        return PluginSettings(
+            disable_discovery=self.disable_plugin_discovery,
+            allowlist=self.plugin_allowlist_set,
+        )
+
+    @property
+    def is_networked_profile(self) -> bool:
+        return not self.is_loopback_bind_host(self.bind_host)
+
+    def require_networked_profile(self) -> None:
+        """Fail fast when binding beyond localhost without hardened defaults."""
+        if not self.is_networked_profile:
+            return
+        self.require_api_token_for_bind_host()
+        if not self.allowed_vault_root_paths:
+            raise RuntimeError(
+                f"ALLOWED_VAULT_ROOTS must be set when BIND_HOST={self.bind_host!r} "
+                "(non-loopback). Open vault mode is not allowed on networked binds."
+            )
+        if not self.disable_plugin_discovery and not self.plugin_allowlist_set:
+            raise RuntimeError(
+                "Set DISABLE_PLUGIN_DISCOVERY=true or PLUGIN_ALLOWLIST when binding "
+                f"non-loopback ({self.bind_host!r})."
+            )
 
     @property
     def llm_enabled(self) -> bool:

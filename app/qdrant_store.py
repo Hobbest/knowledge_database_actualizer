@@ -5,14 +5,22 @@ from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
-from app.chunking import chunk_text
 from app.config import settings
 from app.embeddings import EmbeddingService, get_embedding_service
-from app.index_meta import save_index_meta
+from app.indexing import (
+    IndexedChunk,
+    build_chunks_for_note,
+    finalize_index_meta,
+    fingerprints_for_vault,
+    index_stats_from_plan,
+    iter_vault_index_chunks,
+    merge_note_fingerprints,
+    plan_vault_index,
+)
+from app.runtime import INDEX_LOCK
 from app.similarity import adjusted_similarity
-from app.vault import embedding_text_for_note, load_vault
-from app.vault_fingerprints import note_fingerprint
-from app.vectorstore import IndexedChunk, SampledChunk, SimilarChunk
+from app.vault import load_note, load_vault
+from app.vectorstore import SampledChunk, SimilarChunk
 
 
 def _qdrant_models() -> Any:
@@ -87,70 +95,139 @@ class QdrantVectorStore:
             )
 
     def reset(self) -> None:
+        with INDEX_LOCK:
+            try:
+                self._client.delete_collection(collection_name=self.collection_name)
+            except Exception:
+                pass
+            self._ensure_collection()
+
+    def _delete_note_chunks(self, note_path: str) -> None:
+        models = _qdrant_models()
         try:
-            self._client.delete_collection(collection_name=self.collection_name)
+            self._client.delete(
+                collection_name=self.collection_name,
+                points_selector=models.FilterSelector(
+                    filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="note_path",
+                                match=models.MatchValue(value=note_path),
+                            )
+                        ]
+                    )
+                ),
+            )
         except Exception:
             pass
-        self._ensure_collection()
 
     def index_vault(self, vault_path: Path) -> dict[str, Any]:
-        """Build a complete Qdrant index using the same chunk format as Chroma."""
-        vault_path = vault_path.resolve()
-        loaded = load_vault(vault_path)
-        notes_by_path = {note.path.as_posix(): note for note in loaded.notes}
-        chunks: list[dict[str, Any]] = []
-        for note in loaded.notes:
-            for chunk in chunk_text(
-                embedding_text_for_note(note, notes_by_path=notes_by_path),
-                chunk_size=settings.chunk_size,
-                chunk_overlap=settings.chunk_overlap,
-                source_label=note.title,
-            ):
-                chunks.append(
-                    {
-                        "chunk_id": f"{note.path.as_posix()}::{chunk.index}",
-                        "note_path": note.path.as_posix(),
-                        "note_title": note.title,
-                        "text": chunk.text,
-                        "heading": chunk.heading,
-                        "tags": note.tags,
-                        "wikilinks": note.wikilinks,
-                    }
-                )
-        self.reset()
+        """Embed and index the vault using shared fingerprint-aware orchestration."""
+        plan = plan_vault_index(vault_path)
+        if plan.full_rebuild:
+            with INDEX_LOCK:
+                try:
+                    self._client.delete_collection(collection_name=self.collection_name)
+                except Exception:
+                    pass
+                self._ensure_collection()
+
         batch_size = max(1, settings.chroma_index_batch_size)
-        for start in range(0, len(chunks), batch_size):
-            self.upsert_chunks(chunks[start : start + batch_size])
-        fingerprints = {
-            note.path.as_posix(): note_fingerprint(vault_path, note)
-            for note in loaded.notes
-        }
-        save_index_meta(
-            vault_path=vault_path,
-            chunk_count=len(chunks),
-            note_count=loaded.note_count,
-            note_fingerprints=fingerprints,
-            index_mode="full",
+        indexed_note_count = 0
+        chunk_delta = 0
+        pending: list[IndexedChunk] = []
+
+        with INDEX_LOCK:
+            for rel in plan.removed_paths:
+                self._delete_note_chunks(rel)
+
+            for note, note_chunks in iter_vault_index_chunks(plan):
+                rel = note.path.as_posix()
+                self._delete_note_chunks(rel)
+                if note_chunks:
+                    indexed_note_count += 1
+                pending.extend(note_chunks)
+                while len(pending) >= batch_size:
+                    batch = pending[:batch_size]
+                    del pending[:batch_size]
+                    chunk_delta += self.upsert_chunks(batch)
+
+            if pending:
+                chunk_delta += self.upsert_chunks(pending)
+
+            total_chunks = self.chunk_count()
+
+        new_fingerprints = fingerprints_for_vault(plan.vault_path, list(plan.current_notes.values()))
+        stats = index_stats_from_plan(
+            plan,
+            chunk_count=total_chunks,
+            indexed_note_count=indexed_note_count,
+            chunk_delta=chunk_delta,
         )
-        return {
-            "vault_path": str(vault_path),
-            "note_count": loaded.note_count,
-            "link_count": loaded.link_count,
-            "chunk_count": len(chunks),
-            "duplicate_stems": loaded.duplicate_stems,
-            "index_mode": "full",
-            "indexed_notes": loaded.note_count,
-            "skipped_notes": 0,
-            "removed_notes": 0,
-            "chunks_added": len(chunks),
-        }
+        finalize_index_meta(
+            vault_path=plan.vault_path,
+            chunk_count=total_chunks,
+            note_count=plan.note_count,
+            note_fingerprints=new_fingerprints,
+            index_mode=str(stats["index_mode"]),
+        )
+        return stats
 
     def upsert_notes(self, vault_path: Path, relative_paths: list[str]) -> dict[str, Any]:
-        # A full rebuild keeps deletion/replacement semantics correct across
-        # Qdrant versions; incremental point filtering can be added later.
-        stats = self.index_vault(vault_path)
-        stats["requested_paths"] = list(relative_paths)
-        return stats
+        vault_path = vault_path.resolve()
+        unique_paths = list(dict.fromkeys(p for p in relative_paths if p))
+        missing: list[str] = []
+        prepared: list[tuple[str, list[IndexedChunk]]] = []
+
+        notes_by_path = None
+        link_index = None
+        if settings.transclude_depth > 0:
+            from app.indexing import build_wikilink_context
+
+            vault_result = load_vault(vault_path)
+            notes_by_path, link_index = build_wikilink_context(vault_result)
+
+        for rel in unique_paths:
+            note = load_note(vault_path, rel)
+            if note is None:
+                missing.append(rel)
+                prepared.append((rel, []))
+                continue
+            prepared.append(
+                (
+                    rel,
+                    build_chunks_for_note(
+                        note,
+                        notes_by_path=notes_by_path,
+                        link_index=link_index,
+                    ),
+                )
+            )
+
+        indexed = 0
+        chunk_count = 0
+        with INDEX_LOCK:
+            for rel, note_chunks in prepared:
+                self._delete_note_chunks(rel)
+                if not note_chunks:
+                    continue
+                chunk_count += self.upsert_chunks(note_chunks)
+                indexed += 1
+            total_chunks = self.chunk_count()
+
+        finalize_index_meta(
+            vault_path=vault_path,
+            chunk_count=total_chunks,
+            note_count=None,
+            note_fingerprints=merge_note_fingerprints(vault_path, unique_paths),
+            index_mode="incremental",
+        )
+        return {
+            "indexed_notes": indexed,
+            "missing_notes": missing,
+            "chunk_count_added": chunk_count,
+            "chunk_count": total_chunks,
+        }
 
     def upsert_chunks(
         self,
@@ -308,8 +385,9 @@ class QdrantVectorStore:
         return matches[: max(1, top_k)]
 
     def chunk_count(self) -> int:
-        result = self._client.count(collection_name=self.collection_name, exact=True)
-        return int(getattr(result, "count", result))
+        with INDEX_LOCK:
+            result = self._client.count(collection_name=self.collection_name, exact=True)
+            return int(getattr(result, "count", result))
 
     upsert = upsert_chunks
     query = query_similar

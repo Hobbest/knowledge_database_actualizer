@@ -32,6 +32,36 @@ def test_bind_host_public_requires_token():
     cfg.require_api_token_for_bind_host()
 
 
+def test_networked_profile_requires_vault_roots_and_plugin_policy():
+    cfg = Settings(
+        bind_host="0.0.0.0",
+        api_token="secret",
+        allowed_vault_roots="",
+        disable_plugin_discovery=False,
+        plugin_allowlist="",
+    )
+    with pytest.raises(RuntimeError, match="ALLOWED_VAULT_ROOTS"):
+        cfg.require_networked_profile()
+
+    cfg = Settings(
+        bind_host="0.0.0.0",
+        api_token="secret",
+        allowed_vault_roots="/vaults",
+        disable_plugin_discovery=False,
+        plugin_allowlist="",
+    )
+    with pytest.raises(RuntimeError, match="PLUGIN_ALLOWLIST"):
+        cfg.require_networked_profile()
+
+    ok = Settings(
+        bind_host="0.0.0.0",
+        api_token="secret",
+        allowed_vault_roots="/vaults",
+        disable_plugin_discovery=True,
+    )
+    ok.require_networked_profile()
+
+
 def test_is_loopback_bind_host():
     assert Settings.is_loopback_bind_host("127.0.0.1")
     assert Settings.is_loopback_bind_host("localhost")

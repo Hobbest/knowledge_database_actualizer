@@ -48,7 +48,7 @@ def test_atomic_write_preserves_existing_on_replace_failure(tmp_path: Path):
             raise OSError("simulated disk failure")
         return original_replace(src, dst)
 
-    with patch("app.suggest.os.replace", side_effect=flaky_replace):
+    with patch("app.suggest.apply.os.replace", side_effect=flaky_replace):
         result = apply_suggestion(vault, "notes/a.md", "replacement\n", overwrite=True)
 
     assert result.status == "error"

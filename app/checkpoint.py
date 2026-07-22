@@ -14,12 +14,28 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.auth import validate_suggestion_content, validate_suggestion_note_path
 from app.config import settings
 from app.runtime import CHECKPOINT_LOCK
 from app.source_identity import normalize_source_key
 
 MANIFEST_NAME = "manifest.json"
 LEGACY_LATEST = "latest.json"
+MAX_SUGGESTION_CONTENT_CHARS = 500_000
+
+
+def _validate_suggestions(suggestions: list) -> None:
+    if not isinstance(suggestions, list):
+        raise ValueError("Checkpoint requires a suggestions list")
+    for item in suggestions:
+        if not isinstance(item, dict):
+            raise ValueError("Every suggestion must be a JSON object")
+        note_path = item.get("note_path") or item.get("append_target")
+        if note_path:
+            validate_suggestion_note_path(str(note_path))
+        content = item.get("content")
+        if content is not None:
+            validate_suggestion_content(str(content), max_chars=MAX_SUGGESTION_CONTENT_CHARS)
 
 
 def checkpoint_dir() -> Path:
@@ -354,6 +370,7 @@ def import_checkpoints(payload: dict) -> dict:
             suggestions = state.get("suggestions")
             if not isinstance(source, dict) or not isinstance(suggestions, list):
                 raise ValueError("Checkpoint requires source metadata and a suggestions list")
+            _validate_suggestions(suggestions)
             source_key = str(source.get("source_key") or "").strip() or normalize_source_key(
                 source.get("source_type"),
                 source.get("source_ref"),

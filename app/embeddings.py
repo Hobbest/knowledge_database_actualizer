@@ -320,9 +320,18 @@ def _create_embedding_backend() -> EmbeddingBackend:
         return GeminiEmbeddingBackend(api_key=api_key, model_name=model_name)
 
     if provider != "local":
+        if not settings.disable_plugin_discovery:
+            from app.plugin_api import discover_embedding_backends
+
+            plugins = discover_embedding_backends(
+                allowlist=settings.plugin_allowlist_set or None
+            )
+            factory = plugins.plugins.get(provider)
+            if factory is not None:
+                return factory(model_name=model_name)
         raise ValueError(
             f"Unsupported EMBEDDING_PROVIDER '{settings.embedding_provider}'. "
-            "Use 'local' or 'gemini'."
+            "Use 'local', 'gemini', or install an actualizer.embedding_backends plugin."
         )
 
     return LocalEmbeddingBackend(model_name)

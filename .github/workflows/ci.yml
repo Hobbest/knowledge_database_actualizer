@@ -35,6 +35,9 @@ jobs:
       - name: Check .env.example
         run: python scripts/env_sync.py check
 
+      - name: Check ARCHITECTURE.md drift
+        run: python scripts/architecture_drift.py check
+
       - name: Run unit tests
         run: pytest tests/ -q
         env:

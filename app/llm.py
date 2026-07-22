@@ -238,7 +238,12 @@ class OllamaProvider(LLMProvider):
         from openai import OpenAI
 
         # Ollama does not require a real key; the client still wants a string.
-        self.client = OpenAI(base_url=f"{base_url.rstrip('/')}/v1", api_key="ollama")
+        # Bound timeouts so a hung local model cannot freeze analyze forever.
+        self.client = OpenAI(
+            base_url=f"{base_url.rstrip('/')}/v1",
+            api_key="ollama",
+            timeout=300.0,
+        )
         self.model = model
         self.base_url = base_url
 

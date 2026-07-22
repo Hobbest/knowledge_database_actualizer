@@ -1,9 +1,17 @@
 (function (root, factory) {
-  const api = factory();
+  const api = factory(root);
   if (typeof module === "object" && module.exports) module.exports = api;
   root.KdaWebCore = api;
-})(typeof globalThis !== "undefined" ? globalThis : this, function () {
+})(typeof globalThis !== "undefined" ? globalThis : this, function (root) {
   "use strict";
+
+  const globalRoot =
+    root ||
+    (typeof globalThis !== "undefined"
+      ? globalThis
+      : typeof window !== "undefined"
+        ? window
+        : {});
 
   const ALLOWED_FILE_EXTENSIONS = [".txt", ".md", ".markdown", ".pdf", ".epub", ".docx"];
 
@@ -105,6 +113,17 @@
   }
 
   function createNdjsonParser(onEvent) {
+    if (typeof require === "function") {
+      try {
+        const shared = require("../shared/api-client.js");
+        return shared.createNdjsonParser(onEvent);
+      } catch (_error) {
+        /* browser bundle without shared module */
+      }
+    }
+    if (globalRoot.KdaApiClient?.createNdjsonParser) {
+      return globalRoot.KdaApiClient.createNdjsonParser(onEvent);
+    }
     let buffer = "";
     const parseLine = (line) => {
       const trimmed = line.trim();
@@ -210,6 +229,16 @@
   }
 
   function buildPreviewPayload(suggestion, vaultPath) {
+    if (typeof require === "function") {
+      try {
+        return require("../shared/api-client.js").buildPreviewPayload(suggestion, vaultPath);
+      } catch (_error) {
+        /* browser bundle */
+      }
+    }
+    if (globalRoot.KdaApiClient?.buildPreviewPayload) {
+      return globalRoot.KdaApiClient.buildPreviewPayload(suggestion, vaultPath);
+    }
     return {
       vault_path: String(vaultPath || "").trim() || null,
       note_path: String(suggestion?.note_path || suggestion?.append_target || "").trim(),
@@ -289,6 +318,16 @@
   }
 
   function isAbortError(error) {
+    if (typeof require === "function") {
+      try {
+        return require("../shared/api-client.js").isAbortError(error);
+      } catch (_error) {
+        /* browser bundle */
+      }
+    }
+    if (globalRoot.KdaApiClient?.isAbortError) {
+      return globalRoot.KdaApiClient.isAbortError(error);
+    }
     return error?.name === "AbortError";
   }
 

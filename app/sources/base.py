@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Protocol
 
 
 @dataclass
@@ -149,15 +150,17 @@ class LoadedSource:
             self.text = "\n\n".join(segment.text for segment in self.segments if segment.text.strip())
 
 
-class SourceLoader:
+class SourceLoader(Protocol):
+    """Structural interface for source loaders (class duck-typing remains valid)."""
+
     def load_from_path(self, path):  # noqa: ANN001
-        raise NotImplementedError
+        ...
 
     def load_from_url(self, url: str) -> LoadedSource:
-        raise NotImplementedError
+        ...
 
     def supports_path(self, path) -> bool:  # noqa: ANN001
-        return False
+        ...
 
     def supports_url(self, url: str) -> bool:
-        return False
+        ...

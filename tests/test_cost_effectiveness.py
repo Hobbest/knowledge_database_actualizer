@@ -47,7 +47,7 @@ def test_failed_retried_calls_are_all_recorded(monkeypatch, tmp_data_dir):
     source = _source()
     topic = AtomicTopic("Concept", source.segments, "Concept")
     budget = LLMBudget(max_calls=0, max_input_chars=0)
-    monkeypatch.setattr("app.suggest.get_llm_provider", lambda: RateLimitedProvider())
+    monkeypatch.setattr("app.suggest.draft.get_llm_provider", lambda: RateLimitedProvider())
 
     with pytest.raises(RuntimeError, match="429"):
         call_with_retry(
@@ -129,7 +129,7 @@ def test_batch_drafting_shrinks_to_use_remaining_budget(monkeypatch, tmp_data_di
                 ]
             )
 
-    monkeypatch.setattr("app.suggest.get_llm_provider", lambda: FakeProvider())
+    monkeypatch.setattr("app.suggest.draft.get_llm_provider", lambda: FakeProvider())
     monkeypatch.setattr("app.suggest.settings.llm_draft_batch_size", 3)
     monkeypatch.setattr("app.suggest.settings.generate_moc", False)
     monkeypatch.setattr("app.suggest.settings.include_media", False)
@@ -138,7 +138,7 @@ def test_batch_drafting_shrinks_to_use_remaining_budget(monkeypatch, tmp_data_di
     monkeypatch.setattr("app.suggest.settings.llm_api_key", "test-key")
     monkeypatch.setattr("app.suggest.settings.llm_max_calls_per_run", 0)
     monkeypatch.setattr("app.suggest.settings.llm_max_input_chars_per_run", budget_cap)
-    monkeypatch.setattr("app.suggest._plan_topics", lambda *_a, **_k: topics)
+    monkeypatch.setattr("app.suggest.plan._plan_topics", lambda *_a, **_k: topics)
 
     events = list(iter_note_suggestions(source, novelty, vector_store=None))
     final = next(event for event in events if event.get("type") == "suggestions")
@@ -275,7 +275,7 @@ def test_resume_reuses_similarity_and_plan_without_calls(
         lambda *_args, **_kwargs: pytest.fail("resume must not embed source"),
     )
     monkeypatch.setattr(
-        "app.suggest._plan_topics",
+        "app.suggest.plan._plan_topics",
         lambda *_args, **_kwargs: pytest.fail("resume must not re-plan topics"),
     )
 

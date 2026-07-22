@@ -3,8 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from app.embeddings import EmbeddingBackend, EmbeddingService
+from app.indexing import IndexedChunk
 from app.qdrant_store import QdrantVectorStore
-from app.vectorstore import IndexedChunk
 
 
 class _Embeddings(EmbeddingBackend):
@@ -71,7 +71,7 @@ def test_qdrant_adapter_upsert_query_count_and_sample(monkeypatch):
 
 def test_qdrant_adapter_indexes_vault(monkeypatch, tmp_path):
     monkeypatch.setattr("app.qdrant_store._qdrant_models", lambda: _Models)
-    monkeypatch.setattr("app.qdrant_store.save_index_meta", lambda **kwargs: kwargs)
+    monkeypatch.setattr("app.indexing.finalize_index_meta", lambda **kwargs: kwargs)
     (tmp_path / "note.md").write_text("# Note\n\nUseful indexed knowledge.")
     store = QdrantVectorStore(
         collection_name="vault",

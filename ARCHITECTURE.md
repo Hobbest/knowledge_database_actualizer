@@ -86,7 +86,7 @@ writes are safe-by-default; the vector index stays in sync after apply.
 | Frontend | Vanilla JS SPA, vendored Tailwind + vis-network | No build step; auth token in `sessionStorage` |
 | Obsidian client | Community plugin (`main.js`, `core.js`) | Commands + sidebar; canonical writes via `apply-batch` |
 | Embeddings | **sentence-transformers** *or* **google-genai** | Lazy load; batched queries; retries |
-| Vector store | **ChromaDB** (persistent) | Collection per provider+model; batched upsert |
+| Vector store | **ChromaDB** (default) or **Qdrant** (`VECTOR_BACKEND=qdrant`) | Collection/collection-name per provider+model; batched upsert; shared indexing orchestration |
 | Graph | **networkx** `DiGraph` | Path/stem/alias wikilink resolution |
 | Sources | `pypdf`, `pdfplumber`, `youtube-transcript-api` / `yt-dlp`, `trafilatura`, frontmatter | Tables/figures via pdfplumber; md tags/wikilinks; article extraction |
 | Frontmatter write | **PyYAML** `safe_dump` | No unsafe dump of user/LLM text |
@@ -99,11 +99,15 @@ writes are safe-by-default; the vector index stays in sync after apply.
 
 ```
 app/
-├── main.py                 FastAPI app, auth middleware, NDJSON stream, apply refresh
+├── main.py                 FastAPI composition root, middleware, include_routers, static
+├── deps.py                 Shared app singletons (vector store, graph, source dispatcher)
+├── api/                    Thin APIRouter modules (vault, sources, suggestions, admin, chat)
+├── auth.py                 API token capability checks and route mapping
 ├── config.py               Pydantic settings (.env); validated thresholds / budgets
 ├── env_sync.py             Generate / merge .env.example from Settings
 ├── runtime.py              INDEX_LOCK, CHECKPOINT_LOCK, WORKER_POOL, ANALYZE_POOL
 ├── index_meta.py           data/index_meta.json, stale_note_count, health warnings
+├── indexing.py             Shared vault→chunk→fingerprint orchestration for vector backends
 ├── thresholds.py           Recommended novelty bands per embedding provider
 ├── threshold_calibration.py  Vault-specific threshold suggestions from chunk samples
 ├── similarity.py           Tag-overlap similarity boost for novelty scoring
@@ -114,19 +118,34 @@ app/
 ├── note_output.py            Note paths, templates, append body, topic overlap match
 ├── block_refs.py             Optional ^block-id injection on write
 ├── vault_fingerprints.py     Per-note content hashes for incremental index
+├── vault_index.py            Multi-vault collection tokens
+├── vault_watcher.py          Debounced re-index on vault file changes
+├── url_security.py           SSRF / fetch URL guards
+├── plugin_api.py             Entry-point discovery (sources, LLM, embeddings, vector)
+├── vector_protocol.py        VectorStoreProtocol structural typing
+├── qdrant_store.py           Qdrant persistence adapter
+├── observability.py          Structured logging + request metrics
+├── analytics.py              Local analyze/apply telemetry
+├── chat.py                   Vault RAG chat answers
+├── reports.py                MD/HTML analysis report export
+├── note_intelligence.py      RAG draft context, quality, duplicate detection
+├── prompt_domains.py         Domain prompt packs (bundled + DATA_DIR + plugins)
+├── prompts.py                Centralized prompts
+├── git_integration.py        Optional auto-commit after apply
+├── vision.py                 Optional vision/media helpers
+├── update_detection.py       Update-vs-new note signals
+├── json_extract.py           Robust LLM JSON extraction
+├── settings_persistence.py   Safe .env threshold writes
+├── preflight.py              Startup capability checks
 ├── sources/
 │   ├── base.py               LoadedSource (+ wikilinks, tags), SourceSegment, SourceLocation
-│   ├── __init__.py           SourceDispatcher
-│   ├── pdf.py                PdfLoader (page segments + tables; quality warnings)
-│   ├── epub.py               EpubLoader (chapter segments via trafilatura)
-│   ├── docx.py               DocxLoader (mammoth → markdown segments)
-│   ├── text.py               TextLoader (strips frontmatter; extracts wikilinks/tags)
-│   ├── web.py                WebArticleLoader (trafilatura main-content extraction)
-│   └── youtube.py            YouTubeLoader (canonical watch URL)
+│   ├── __init__.py           SourceDispatcher (+ entry-point plugins)
+│   ├── pdf.py / pdf_quality.py  PdfLoader + quality warnings
+│   ├── epub.py / docx.py / text.py / web.py / youtube.py / audio.py
 ├── vault.py                  load_vault / load_note; tags, aliases, embeds; rich embedding text
 ├── chunking.py               Heading-aware overlapping chunks
-├── embeddings.py             EmbeddingService + Local/Gemini backends (+ retry)
-├── vectorstore.py            Batched index + query_similar_many (+ tag boost, sample_chunks)
+├── embeddings.py             EmbeddingService + Local/Gemini backends (+ plugins)
+├── vectorstore.py            ChromaVectorStore; batched index + query_similar_many
 ├── graph.py                  KnowledgeGraph; upsert_notes after apply
 ├── novelty.py                Batched scoring → verdict; overlapping note tags
 ├── segmentation.py           Bounded planning units
@@ -134,26 +153,27 @@ app/
 ├── media.py                  Tables & figure captions → notes
 ├── atomic_notes.py           Topic planning (structural + optional LLM); segment scoring
 ├── summarize.py              Extractive fallback drafting helpers
-├── suggest.py                Draft loop, MOC, overwrite-safe apply (write/append)
-├── llm.py                    Providers + rate-limit retry helpers
+├── suggest/                  Draft · plan · apply package (stable `app.suggest` façade)
+├── llm.py                    Providers + rate-limit retry helpers (+ plugins)
 ├── llm_budget.py             Per-run call / input-char caps
-├── prompts.py                Centralized prompts
 ├── text_utils.py / text_limits.py
 └── checkpoint.py             Incremental note persistence; resume matching
 
 frontend/                   index.html + app.js (SPA)
+shared/                     Shared SPA/plugin HTTP + NDJSON helpers
 obsidian-plugin/            manifest.json, main.js, styles.css (thin API client)
-tests/                      Hermetic unit tests (fake embeddings; 102 tests)
+tests/                      Hermetic unit tests (fake embeddings)
 scripts/smoke_test.py       Optional integration (real MiniLM)
 .github/workflows/ci.yml
 ```
 
 | Concern | Modules |
 |---------|---------|
-| Ingestion | `sources`, `source_identity`, `vault`, `wikilinks`, `chunking` |
-| Retrieval & judgement | `embeddings`, `vectorstore`, `similarity`, `novelty`, `thresholds`, `threshold_calibration`, `index_meta`, `vault_fingerprints` |
-| Note generation | `segmentation`, `relevance`, `media`, `atomic_notes`, `summarize`, `note_output`, `suggest`, `llm`, `llm_budget` |
-| Obsidian integration | `obsidian_uri`, `obsidian_templates`, `note_output`, `block_refs`, `wikilinks` |
+| Ingestion | `sources`, `source_identity`, `vault`, `wikilinks`, `chunking`, `url_security` |
+| Retrieval & judgement | `embeddings`, `vectorstore`, `qdrant_store`, `vector_protocol`, `indexing`, `similarity`, `novelty`, `thresholds`, `threshold_calibration`, `index_meta`, `vault_fingerprints`, `vault_index` |
+| Note generation | `segmentation`, `relevance`, `media`, `atomic_notes`, `summarize`, `note_output`, `suggest`, `note_intelligence`, `llm`, `llm_budget`, `prompt_domains`, `json_extract` |
+| Obsidian integration | `obsidian_uri`, `obsidian_templates`, `note_output`, `block_refs`, `wikilinks`, `git_integration` |
+| HTTP & ops | `main`, `api`, `observability`, `analytics`, `chat`, `reports`, `vault_watcher`, `plugin_api`, `preflight`, `settings_persistence` |
 | Concurrency & durability | `runtime`, `checkpoint` |
 | Visualization | `graph` |
 
@@ -535,19 +555,32 @@ by `MAX_FETCH_MB` (default 10). LLM prompts fence untrusted source text between
 
 | Method & path | Purpose |
 |---------------|---------|
-| `GET /api/status` | Config, index/graph sizes, LLM/embedding info, budgets, `stale_note_count`, `warnings`, `auth_required`, Obsidian URI flags, `thresholds.calibration_available` |
+| `GET /api/status` | Config, index/graph sizes, LLM/embedding info, budgets, `stale_note_count`, `warnings`, `auth_required`, capabilities, plugin health, Obsidian URI flags, `thresholds.calibration_available` |
+| `GET /api/debug/recent-logs` | Recent structured log lines (admin capability) |
 | `POST /api/vault/index` | Incremental re-index + graph + `index_meta` (`if_stale` skips when fresh) |
 | `POST /api/vault/watch` | Enable/disable debounced index-on-save |
 | `GET /api/vault/note` | Read existing note content (append diff preview) |
+| `GET /api/vault/search` | Keyword / semantic vault search over indexed chunks |
+| `GET /api/vault/index/export` | Export index metadata / fingerprints |
 | `GET /api/vault/thresholds/calibrate` | Suggest novelty thresholds from indexed chunk samples |
+| `POST /api/vault/thresholds` | Persist calibrated novelty thresholds to `.env` (admin) |
 | `GET /api/vault/graph` | Vis-network JSON (optional highlight) |
+| `POST /api/vault/refresh-notes` | Re-embed notes already written on disk |
 | `POST /api/sources/analyze` | NDJSON: novelty + suggestions (`resume`, `vault_note_path`, `vault_path` optional) |
+| `POST /api/chat` | Vault RAG chat answer with cited notes |
+| `GET /api/analytics` | Local analyze/apply telemetry summary |
+| `POST /api/reports/export` | Export analysis report as Markdown or HTML |
 | `GET /api/suggestions/checkpoint` | Saved notes for a source key / latest incomplete run |
+| `GET /api/suggestions/checkpoint/export` | Download checkpoint JSON for a source |
+| `POST /api/suggestions/checkpoint/import` | Import checkpoint suggestions (validated paths; admin) |
 | `POST /api/suggestions/preview` | Exact merged note content without writing |
 | `POST /api/suggestions/apply` | One note; `overwrite`, `mode` (`write`/`append`); then incremental re-index |
 | `POST /api/suggestions/apply-batch` | Many notes; per-note results + `index_refresh` |
-| `POST /api/vault/refresh-notes` | Re-embed notes already written on disk |
 | `GET /`, `/static/*` | SPA |
+
+> CI checks this table via `scripts/architecture_drift.py`: every FastAPI `/api/*`
+> route path must appear above, and curated top-level `app/` modules must appear
+> in the §3 module map.
 
 Analyze `result` payloads include overlapping notes with **tags** and optional
 **obsidian_uri** (when `OBSIDIAN_VAULT_NAME` is set), source **wikilink**
@@ -625,7 +658,7 @@ data/
 | `node --test frontend/app-core.test.js` | Web client NDJSON, preview payload, and input validation contracts |
 | `npm --prefix obsidian-plugin test` | Obsidian client NDJSON + apply payload contracts |
 | `scripts/smoke_test.py` | Optional integration against real MiniLM + sample vault |
-| `.github/workflows/ci.yml` | Ruff, Mypy, env sync, pytest, and client contract tests on Python 3.10 & 3.12 |
+| `.github/workflows/ci.yml` | Ruff, Mypy, env sync, architecture drift, pytest, and client contract tests on Python 3.10 & 3.12 |
 
 Pinned runtime deps live in `requirements.txt` / `pyproject.toml`;
 `requirements-dev.txt` adds pytest + httpx.
@@ -634,16 +667,19 @@ Pinned runtime deps live in `requirements.txt` / `pyproject.toml`;
 
 ## 17. Extension points
 
-- **New source type:** `SourceLoader` under `app/sources/` emitting
-  `SourceSegment`s; register in `SourceDispatcher`; extend
-  `normalize_source_key` if resume identity needs it.
-- **New embedding/LLM provider:** `EmbeddingBackend` / `LLMProvider` + factory
-  wiring (`get_embedding_service` / `get_llm_provider`).
+- **New source type:** `SourceLoader` Protocol under `app/sources/` emitting
+  `SourceSegment`s; register in `SourceDispatcher` or via entry point
+  `actualizer.source_loaders`; extend `normalize_source_key` if resume identity needs it.
+- **New embedding/LLM/vector provider:** `EmbeddingBackend` / `LLMProvider` /
+  `VectorStoreProtocol` + factories, or entry points `actualizer.embedding_backends`,
+  `actualizer.llm_providers`, `actualizer.vector_stores`.
+- **Prompt domain packs:** bundled JSON under `prompts/domains/`, user packs under
+  `DATA_DIR/domains/`, or entry point `actualizer.prompt_domains`.
 - **Tuning volume/cost:** `SEGMENT_TARGET_CHARS`, `MAX_NOTES_PER_SOURCE`,
   atomic limits, and LLM budget caps.
 - **Similarity tuning:** tag boost knobs, threshold calibration sample size, or
   provider defaults in `thresholds.py`.
-- **Prompt changes:** `app/prompts.py`.
+- **Prompt changes:** `app/prompts.py` / domain packs.
 
 ---
 

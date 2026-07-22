@@ -1,16 +1,10 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import math
-import os
 import re
-import shutil
-import tempfile
 import threading
-from collections.abc import Callable, Generator, Iterator
-from dataclasses import asdict, dataclass
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from queue import SimpleQueue
@@ -21,11 +15,8 @@ import yaml
 from app.atomic_notes import (
     AtomicTopic,
     SegmentNovelty,
-    plan_atomic_topics,
-    score_segments,
     topic_location,
 )
-from app.block_refs import inject_block_references
 from app.checkpoint import SuggestionCheckpoint
 from app.config import settings
 from app.json_extract import extract_json_array
@@ -40,7 +31,6 @@ from app.note_intelligence import (
 from app.note_output import (
     apply_note_template,
     default_note_path,
-    merge_append_into_note,
     moc_note_path,
     normalize_vault_relative_path,
     parse_append_target,
@@ -49,10 +39,14 @@ from app.note_output import (
 )
 from app.novelty import NoveltyResult, OverlappingNote, novelty_to_checkpoint
 from app.prompts import NOTE_WRITER_SYSTEM_PROMPT, batch_note_draft_prompt, note_draft_prompt
-from app.relevance import filter_relevant_segments, is_boilerplate_title, is_low_value_text
-from app.segmentation import split_large_segments
-from app.source_identity import normalize_source_key
 from app.sources.base import LoadedSource, SourceLocation, SourceSegment
+from app.suggest.models import NoteSuggestion
+from app.suggest.plan import (
+    _source_meta,
+    _stream_plan_topics,
+    analysis_fingerprint,
+    topics_to_checkpoint,
+)
 from app.summarize import (
     compose_title,
     ensure_concept_heading,
@@ -68,80 +62,6 @@ from app.wikilinks import format_wikilink
 
 logger = logging.getLogger(__name__)
 
-ProgressFn = Callable[[str, int, int, str], None]
-_PLAN_DONE = object()
-
-
-@dataclass
-class NoteSuggestion:
-    concept_title: str
-    note_path: str
-    content: str
-    location: dict
-    segment_indices: list[int]
-    write_mode: str = "write"
-    append_target: str | None = None
-    append_heading: str | None = None
-    overlap_similarity: float | None = None
-    is_moc: bool = False
-    # True when any reliably scored segment looked novel vs the vault.
-    # False (known/partial/unknown) → UI default-deselects; drafting still runs.
-    is_novel: bool = True
-    quality_score: float | None = None
-    quality_flags: list[str] | None = None
-    duplicate_of: str | None = None
-    duplicate_similarity: float | None = None
-    update_type: str | None = None
-    update_target: str | None = None
-    update_reason: str | None = None
-
-    def to_dict(self) -> dict:
-        return {
-            "concept_title": self.concept_title,
-            "note_path": self.note_path,
-            "content": self.content,
-            "location": self.location,
-            "segment_indices": self.segment_indices,
-            "write_mode": self.write_mode,
-            "append_target": self.append_target,
-            "append_heading": self.append_heading,
-            "overlap_similarity": self.overlap_similarity,
-            "is_moc": self.is_moc,
-            "is_novel": self.is_novel,
-            "quality_score": self.quality_score,
-            "quality_flags": list(self.quality_flags or []),
-            "duplicate_of": self.duplicate_of,
-            "duplicate_similarity": self.duplicate_similarity,
-            "update_type": self.update_type,
-            "update_target": self.update_target,
-            "update_reason": self.update_reason,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> NoteSuggestion:
-        return cls(
-            concept_title=data.get("concept_title", ""),
-            note_path=data.get("note_path", ""),
-            content=data.get("content", ""),
-            location=data.get("location") or {},
-            segment_indices=list(data.get("segment_indices") or []),
-            write_mode=data.get("write_mode", "write"),
-            append_target=data.get("append_target"),
-            append_heading=data.get("append_heading"),
-            overlap_similarity=data.get("overlap_similarity"),
-            is_moc=bool(data.get("is_moc")),
-            # Missing key (older checkpoints) → treat as novel so we do not
-            # surprise-deselect recovered drafts.
-            is_novel=bool(data["is_novel"]) if "is_novel" in data else True,
-            quality_score=data.get("quality_score"),
-            quality_flags=list(data.get("quality_flags") or []) or None,
-            duplicate_of=data.get("duplicate_of"),
-            duplicate_similarity=data.get("duplicate_similarity"),
-            update_type=data.get("update_type"),
-            update_target=data.get("update_target"),
-            update_reason=data.get("update_reason"),
-        )
-
 
 def _note_identity(segment_indices: list[int], concept_title: str) -> tuple:
     """Stable key for matching a planned topic to an already-drafted note.
@@ -151,63 +71,6 @@ def _note_identity(segment_indices: list[int], concept_title: str) -> tuple:
     """
     indices = tuple(sorted(int(i) for i in segment_indices))
     return (indices, concept_title.strip().lower())
-
-
-def analysis_fingerprint(source: LoadedSource) -> str:
-    shaping_settings = {
-        "segment_target_chars": settings.segment_target_chars,
-        "filter_boilerplate": settings.filter_boilerplate,
-        "novel_threshold": settings.novel_threshold,
-        "known_threshold": settings.known_threshold,
-        "embedding_provider": settings.embedding_provider,
-        "embedding_model": settings.embedding_model,
-        "tag_similarity_enabled": settings.tag_similarity_enabled,
-        "tag_similarity_boost_per_tag": settings.tag_similarity_boost_per_tag,
-        "tag_similarity_max_boost": settings.tag_similarity_max_boost,
-        "max_notes_per_source": settings.max_notes_per_source,
-        "atomic_note_line_limit": settings.atomic_note_line_limit,
-        "atomic_note_char_limit": settings.atomic_note_char_limit,
-    }
-    payload = json.dumps(shaping_settings, sort_keys=True, separators=(",", ":"))
-    digest = hashlib.sha256()
-    digest.update(source.text.encode("utf-8"))
-    digest.update(b"\0")
-    digest.update(payload.encode("utf-8"))
-    return digest.hexdigest()
-
-
-def topics_to_checkpoint(topics: list[AtomicTopic]) -> list[dict]:
-    return [
-        {
-            "title": topic.title,
-            "segment_indices": [segment.index for segment in topic.segments],
-            "summary": topic.summary,
-            "is_novel": topic.is_novel,
-        }
-        for topic in topics
-    ]
-
-
-def topics_from_checkpoint(
-    payload: list[dict],
-    planning_segments: list[SourceSegment],
-) -> list[AtomicTopic]:
-    by_index = {segment.index: segment for segment in planning_segments}
-    topics: list[AtomicTopic] = []
-    for item in payload:
-        indices = item.get("segment_indices") or []
-        segments = [by_index[index] for index in indices if index in by_index]
-        if not segments or len(segments) != len(indices):
-            return []
-        topics.append(
-            AtomicTopic(
-                title=str(item.get("title", "")).strip() or "Untitled concept",
-                segments=segments,
-                summary=str(item.get("summary", "")),
-                is_novel=bool(item.get("is_novel", True)),
-            )
-        )
-    return topics
 
 
 def _related_links(overlapping_notes: list[OverlappingNote]) -> list[str]:
@@ -558,6 +421,13 @@ def _llm_draft_topic_body(
     if budget is not None and not budget.can_call(prompt_chars):
         raise RuntimeError(budget.refuse(prompt_chars))
 
+    logger.info(
+        "LLM draft note '%s' (budget calls %s/%s)",
+        title,
+        (budget.calls + 1) if budget is not None else "?",
+        budget.max_calls if budget is not None and budget.max_calls > 0 else "∞",
+    )
+    # Record even on failure: retries / empty replies still consume provider quota.
     usage = None
     try:
         raw, usage = complete_with_usage(
@@ -565,11 +435,10 @@ def _llm_draft_topic_body(
             prompt,
             system=NOTE_WRITER_SYSTEM_PROMPT,
         )
-        text = raw.strip() or None
+        return raw.strip() or None
     finally:
         if budget is not None:
             budget.record(prompt_chars, usage)
-    return text
 
 
 def _batch_draft_payload(
@@ -733,6 +602,12 @@ def _llm_draft_topics_batch(
     if budget is not None and not budget.can_call(prompt_chars):
         raise RuntimeError(budget.refuse(prompt_chars))
 
+    logger.info(
+        "LLM batch draft %s topic(s) (budget calls %s/%s)",
+        len(topics),
+        (budget.calls + 1) if budget is not None else "?",
+        budget.max_calls if budget is not None and budget.max_calls > 0 else "∞",
+    )
     # Always record the call — provider bills even empty/failed responses.
     usage = None
     try:
@@ -816,108 +691,6 @@ def draft_note_suggestion(
     vector_store: VectorStore | None = None,
 ) -> list[NoteSuggestion]:
     return draft_note_suggestions(source, novelty, vector_store)[:1]
-
-
-def _plan_topics(
-    source: LoadedSource,
-    novelty: NoveltyResult,
-    vector_store: VectorStore | None,
-    *,
-    progress: ProgressFn | None = None,
-    warnings: list[str] | None = None,
-    budget: LLMBudget | None = None,
-    planning_segments: list[SourceSegment] | None = None,
-    segment_scores: list[SegmentNovelty] | None = None,
-) -> list[AtomicTopic]:
-    # Break large source units (e.g. full PDF pages) into bounded planning units
-    # so multi-topic pages are not collapsed into a single note.
-    if planning_segments is None:
-        base_segments = source.segments
-        if settings.filter_boilerplate:
-            base_segments = filter_relevant_segments(base_segments)
-        planning_segments = split_large_segments(
-            base_segments,
-            target_chars=settings.segment_target_chars,
-        )
-
-    indexed = vector_store is not None and vector_store.chunk_count() > 0
-    total = len(planning_segments)
-    warning_sink = warnings if warnings is not None else []
-
-    def on_batch(current: int, batch_total: int, *, rate_limited: bool = False) -> None:
-        if progress:
-            message = (
-                "Similarity scoring rate-limited; marking remaining as unknown"
-                if rate_limited
-                else "Scanning source for distinct concepts"
-            )
-            progress("scoring", current, batch_total, message)
-        if rate_limited:
-            msg = (
-                "Embedding rate limit during similarity scoring; unscored segments "
-                "were marked unknown (not novel) so the run can continue."
-            )
-            if msg not in warning_sink:
-                warning_sink.append(msg)
-            logger.warning(msg)
-
-    if segment_scores is not None:
-        if progress and total:
-            progress("scoring", total, total, "Reusing precomputed similarity scores")
-    elif indexed and vector_store is not None:
-        segment_scores = score_segments(
-            planning_segments,
-            vector_store,
-            source_tags=list(source.tags) if source.tags else None,
-            on_batch=on_batch,
-        )
-        unknown = sum(1 for item in segment_scores if item.is_unknown)
-        if unknown and progress:
-            progress(
-                "scoring",
-                total,
-                total,
-                f"Scored with {unknown} unknown segment(s)",
-            )
-    else:
-        segment_scores = [
-            SegmentNovelty(
-                segment=segment,
-                best_similarity=0.0,
-                is_novel=True,
-                is_unknown=False,
-            )
-            for segment in planning_segments
-            if segment.text.strip()
-        ]
-        if progress and total:
-            progress("scoring", total, total, "No index — treating source segments as novel")
-
-    topics = plan_atomic_topics(source, segment_scores, novelty, budget=budget)
-
-    if settings.filter_boilerplate:
-        # Drop topics whose title is boilerplate or whose body is a link/reference
-        # dump -- planning can split a page so a reference block becomes its own
-        # topic that segment-level filtering never saw.
-        filtered = [
-            topic
-            for topic in topics
-            if not is_boilerplate_title(topic.title)
-            and not is_low_value_text(combine_segment_text(topic.segments))
-        ]
-        topics = filtered or topics
-
-    if not topics:
-        fallback_segments = source.segments[:1]
-        topics = [
-            AtomicTopic(
-                title=source.title,
-                segments=fallback_segments,
-                summary=extract_topic_summary(fallback_segments),
-            )
-        ]
-
-    return topics
 
 
 def _apply_analyze_in_place(
@@ -1086,79 +859,6 @@ def _build_suggestion(
     return suggestion
 
 
-def _source_meta(source: LoadedSource) -> dict:
-    return {
-        "title": source.title,
-        "source_type": source.source_type,
-        "source_ref": source.source_ref,
-        "source_key": source.source_key
-        or normalize_source_key(source.source_type, source.source_ref),
-    }
-
-
-def _stream_plan_topics(
-    source: LoadedSource,
-    novelty: NoveltyResult,
-    vector_store: VectorStore | None,
-    *,
-    warnings: list[str],
-    budget: LLMBudget,
-    planning_segments: list[SourceSegment] | None = None,
-    segment_scores: list[SegmentNovelty] | None = None,
-) -> Generator[dict, None, list[AtomicTopic]]:
-    """Run topic planning while yielding progress events as they happen.
-
-    ``_plan_topics`` is blocking; without a side channel the UI would only see
-    scoring updates after the whole planning phase finished.
-    """
-    events: SimpleQueue = SimpleQueue()
-    result: dict[str, object] = {}
-
-    def progress(stage: str, current: int, total: int, message: str) -> None:
-        events.put(
-            {
-                "type": "progress",
-                "stage": stage,
-                "current": current,
-                "total": total,
-                "message": message,
-            }
-        )
-
-    def worker() -> None:
-        try:
-            result["topics"] = _plan_topics(
-                source,
-                novelty,
-                vector_store,
-                progress=progress,
-                warnings=warnings,
-                budget=budget,
-                planning_segments=planning_segments,
-                segment_scores=segment_scores,
-            )
-            for message in budget.warnings:
-                if message not in warnings:
-                    warnings.append(message)
-                    events.put({"type": "warning", "message": message})
-        except Exception as exc:  # noqa: BLE001 - re-raised after the stream drains
-            result["error"] = exc
-        finally:
-            events.put(_PLAN_DONE)
-
-    thread = threading.Thread(target=worker, name="plan-topics", daemon=True)
-    thread.start()
-    while True:
-        item = events.get()
-        if item is _PLAN_DONE:
-            break
-        yield item
-    thread.join()
-    if "error" in result:
-        raise cast(BaseException, result["error"])
-    return cast(list[AtomicTopic], result["topics"])
-
-
 def iter_note_suggestions(
     source: LoadedSource,
     novelty: NoveltyResult,
@@ -1219,6 +919,11 @@ def iter_note_suggestions(
         )
 
     if settings.llm_enabled and topics:
+        batch_size_hint = max(1, settings.llm_draft_batch_size)
+        pending_count = len(topics)
+        est_rounds = (pending_count + batch_size_hint - 1) // batch_size_hint
+        remaining = budget.remaining_calls
+        capped_rounds = est_rounds if remaining <= 0 else min(est_rounds, remaining)
         yield {
             "type": "progress",
             "stage": "drafting",
@@ -1229,6 +934,23 @@ def iter_note_suggestions(
                 planning=budget.calls > 0,
             ),
         }
+        if get_llm_provider() and capped_rounds > 0:
+            provider_name = (settings.llm_provider or "llm").lower()
+            yield {
+                "type": "warning",
+                "message": (
+                    f"About to run up to {capped_rounds} {provider_name} chat completion(s) "
+                    f"for {pending_count} planned note(s) "
+                    f"(batch size {batch_size_hint}, budget {budget.calls}/{budget.max_calls or '∞'}). "
+                    "Local models can take many minutes — progress updates between calls."
+                ),
+            }
+            logger.info(
+                "Starting LLM drafting: %s topics, ~%s completion rounds, provider=%s",
+                pending_count,
+                capped_rounds,
+                provider_name,
+            )
 
     if checkpoint is not None:
         if resume_suggestions:
@@ -1333,7 +1055,9 @@ def iter_note_suggestions(
                 "total": total,
                 "message": (
                     f"Batch drafting notes {note_start}-{note_end} "
-                    f"(batch {batch_index}, size {take})"
+                    f"(batch {batch_index}, size {take}; "
+                    f"LLM call {budget.calls + 1}"
+                    f"{f'/{budget.max_calls}' if budget.max_calls > 0 else ''})"
                 ),
             }
             try:
@@ -1588,178 +1312,3 @@ def draft_note_suggestions(
 def _strip_source_section(body: str) -> str:
     return re.sub(r"\n## Source\b[\s\S]*$", "", body.strip(), flags=re.IGNORECASE).strip()
 
-
-@dataclass
-class ApplyNoteResult:
-    """Per-note outcome from writing a suggestion into the vault."""
-
-    note_path: str
-    status: str  # written | appended | skipped_exists | error
-    written_path: str | None = None
-    error: str | None = None
-    overwritten: bool = False
-    backup_path: str | None = None
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class MergedNotePreview:
-    note_path: str
-    mode: str
-    exists: bool
-    will_write: bool
-    existing_content: str
-    final_content: str
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-
-def _resolve_vault_target(vault_path: Path, note_path: str) -> Path:
-    vault_path = vault_path.resolve()
-    target = (vault_path / note_path).resolve()
-    if not target.is_relative_to(vault_path):
-        raise ValueError("Refusing to write outside the configured vault path")
-    return target
-
-
-def _backup_existing_note(target: Path, vault_path: Path) -> str:
-    """Copy an existing note to ``*.md.bak`` before overwrite; return vault-relative path."""
-    backup = target.with_name(target.name + ".bak")
-    shutil.copy2(target, backup)
-    return backup.relative_to(vault_path.resolve()).as_posix()
-
-
-def _atomic_write_text(path: Path, content: str) -> None:
-    """Write UTF-8 text via temp file + rename so crashes cannot truncate notes."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_name, path)
-    except BaseException:
-        Path(tmp_name).unlink(missing_ok=True)
-        raise
-
-
-def preview_suggestion_merge(
-    vault_path: Path,
-    note_path: str,
-    content: str,
-    mode: str = "write",
-    *,
-    overwrite: bool = False,
-    append_heading: str | None = None,
-) -> MergedNotePreview:
-    """Return the exact bytes-as-text that apply would write, without mutating the vault."""
-    if mode not in {"write", "append"}:
-        raise ValueError("mode must be 'write' or 'append'")
-    target = _resolve_vault_target(vault_path, note_path)
-    rel = target.relative_to(vault_path.resolve()).as_posix()
-    exists = target.is_file()
-    existing = target.read_text(encoding="utf-8") if exists else ""
-    prepared = inject_block_references(content)
-    if mode == "append" and exists:
-        final = merge_append_into_note(
-            existing,
-            prepared,
-            target_heading=append_heading,
-            fallback_heading="Update",
-        )
-    elif mode == "append":
-        final = inject_block_references(content.strip()) + "\n"
-    else:
-        final = existing if exists and not overwrite else prepared
-    will_write = mode == "append" or not exists or overwrite
-    return MergedNotePreview(
-        note_path=rel,
-        mode=mode,
-        exists=exists,
-        will_write=will_write,
-        existing_content=existing,
-        final_content=final,
-    )
-
-
-def apply_suggestion(
-    vault_path: Path,
-    note_path: str,
-    content: str,
-    mode: str = "write",
-    *,
-    overwrite: bool = False,
-    append_heading: str | None = None,
-) -> ApplyNoteResult:
-    """Write one note into the vault.
-
-    For ``mode="write"``, an existing file is left untouched unless ``overwrite``
-    is True. Overwrites keep a ``.bak`` sibling copy of the previous content.
-    """
-    try:
-        target = _resolve_vault_target(vault_path, note_path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        preview = preview_suggestion_merge(
-            vault_path,
-            note_path,
-            content,
-            mode,
-            overwrite=overwrite,
-            append_heading=append_heading,
-        )
-        rel = preview.note_path
-
-        if mode == "append" and target.exists():
-            _atomic_write_text(target, preview.final_content)
-            return ApplyNoteResult(note_path=note_path, status="appended", written_path=rel)
-
-        if mode == "append" and not target.exists():
-            _atomic_write_text(target, preview.final_content)
-            return ApplyNoteResult(note_path=note_path, status="written", written_path=rel)
-
-        if mode == "write" and target.exists() and not overwrite:
-            return ApplyNoteResult(
-                note_path=note_path,
-                status="skipped_exists",
-                error="Note already exists; pass overwrite=true to replace (a .bak backup is kept)",
-            )
-
-        backup_path: str | None = None
-        overwritten = False
-        if mode == "write" and target.exists() and overwrite:
-            backup_path = _backup_existing_note(target, vault_path)
-            overwritten = True
-
-        _atomic_write_text(target, preview.final_content)
-        return ApplyNoteResult(
-            note_path=note_path,
-            status="written",
-            written_path=rel,
-            overwritten=overwritten,
-            backup_path=backup_path,
-        )
-    except Exception as exc:  # noqa: BLE001 - surface per-note failures to the batch API
-        return ApplyNoteResult(note_path=note_path, status="error", error=str(exc))
-
-
-def apply_suggestions(
-    vault_path: Path,
-    notes: list[dict],
-) -> list[ApplyNoteResult]:
-    """Apply many notes, collecting per-note results instead of aborting on the first failure."""
-    results: list[ApplyNoteResult] = []
-    for note in notes:
-        result = apply_suggestion(
-            vault_path=vault_path,
-            note_path=note["note_path"],
-            content=note["content"],
-            mode=note.get("mode", "write"),
-            overwrite=bool(note.get("overwrite", False)),
-            append_heading=note.get("append_heading"),
-        )
-        results.append(result)
-    return results

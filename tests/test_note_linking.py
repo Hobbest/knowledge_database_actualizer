@@ -164,7 +164,7 @@ def test_novel_topics_drafted_before_known(monkeypatch, tmp_data_dir):
             )
 
     provider = OrderProvider()
-    monkeypatch.setattr("app.suggest.get_llm_provider", lambda: provider)
+    monkeypatch.setattr("app.suggest.draft.get_llm_provider", lambda: provider)
     monkeypatch.setattr("app.suggest.settings.llm_draft_batch_size", 4)
     monkeypatch.setattr("app.suggest.settings.generate_moc", False)
     monkeypatch.setattr("app.suggest.settings.include_media", False)
@@ -174,7 +174,7 @@ def test_novel_topics_drafted_before_known(monkeypatch, tmp_data_dir):
     monkeypatch.setattr("app.suggest.settings.llm_api_key", "test-key")
     monkeypatch.setattr("app.suggest.settings.llm_max_calls_per_run", 0)
     monkeypatch.setattr("app.suggest.settings.llm_max_input_chars_per_run", 0)
-    monkeypatch.setattr("app.suggest._plan_topics", lambda *_a, **_k: topics)
+    monkeypatch.setattr("app.suggest.plan._plan_topics", lambda *_a, **_k: topics)
 
     events = list(iter_note_suggestions(source, novelty, vector_store=None))
     final = next(event for event in events if event.get("type") == "suggestions")

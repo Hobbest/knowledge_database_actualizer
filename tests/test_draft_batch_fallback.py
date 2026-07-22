@@ -50,7 +50,7 @@ def test_batch_failure_does_not_call_per_note_llm(monkeypatch):
             calls.append(prompt[:80])
             raise RuntimeError("simulated batch parse failure")
 
-    monkeypatch.setattr("app.suggest.get_llm_provider", lambda: FakeProvider())
+    monkeypatch.setattr("app.suggest.draft.get_llm_provider", lambda: FakeProvider())
     monkeypatch.setattr("app.suggest.settings.llm_draft_batch_size", 3)
     monkeypatch.setattr("app.suggest.settings.llm_disable_after_failures", 2)
     monkeypatch.setattr("app.suggest.settings.generate_moc", False)
@@ -64,7 +64,7 @@ def test_batch_failure_does_not_call_per_note_llm(monkeypatch):
     def fake_plan(*_args, **_kwargs):
         return topics
 
-    monkeypatch.setattr("app.suggest._plan_topics", fake_plan)
+    monkeypatch.setattr("app.suggest.plan._plan_topics", fake_plan)
 
     events = list(iter_note_suggestions(source, novelty, vector_store=None))
     final = next(event for event in events if event.get("type") == "suggestions")
@@ -104,7 +104,7 @@ def test_batch_partial_success_skips_llm_for_missing(monkeypatch):
             calls["n"] += 1
             return '[{"id": "0", "title": "Alpha", "body": "# Alpha\\n\\nLLM alpha body."}]'
 
-    monkeypatch.setattr("app.suggest.get_llm_provider", lambda: FakeProvider())
+    monkeypatch.setattr("app.suggest.draft.get_llm_provider", lambda: FakeProvider())
     monkeypatch.setattr("app.suggest.settings.llm_draft_batch_size", 2)
     monkeypatch.setattr("app.suggest.settings.generate_moc", False)
     monkeypatch.setattr("app.suggest.settings.include_media", False)
@@ -113,7 +113,7 @@ def test_batch_partial_success_skips_llm_for_missing(monkeypatch):
     monkeypatch.setattr("app.suggest.settings.llm_api_key", "test-key")
     monkeypatch.setattr("app.suggest.settings.llm_max_calls_per_run", 0)
     monkeypatch.setattr("app.suggest.settings.llm_max_input_chars_per_run", 0)
-    monkeypatch.setattr("app.suggest._plan_topics", lambda *_a, **_k: topics)
+    monkeypatch.setattr("app.suggest.plan._plan_topics", lambda *_a, **_k: topics)
 
     events = list(iter_note_suggestions(source, novelty, vector_store=None))
     final = next(event for event in events if event.get("type") == "suggestions")
@@ -175,7 +175,7 @@ def test_batch_delimited_bodies_with_special_chars_are_used(monkeypatch):
                 'Beta explains the "beta" concept.\n'
             )
 
-    monkeypatch.setattr("app.suggest.get_llm_provider", lambda: FakeProvider())
+    monkeypatch.setattr("app.suggest.draft.get_llm_provider", lambda: FakeProvider())
     monkeypatch.setattr("app.suggest.settings.llm_draft_batch_size", 2)
     monkeypatch.setattr("app.suggest.settings.generate_moc", False)
     monkeypatch.setattr("app.suggest.settings.include_media", False)
@@ -185,7 +185,7 @@ def test_batch_delimited_bodies_with_special_chars_are_used(monkeypatch):
     monkeypatch.setattr("app.suggest.settings.llm_api_key", "test-key")
     monkeypatch.setattr("app.suggest.settings.llm_max_calls_per_run", 0)
     monkeypatch.setattr("app.suggest.settings.llm_max_input_chars_per_run", 0)
-    monkeypatch.setattr("app.suggest._plan_topics", lambda *_a, **_k: topics)
+    monkeypatch.setattr("app.suggest.plan._plan_topics", lambda *_a, **_k: topics)
 
     events = list(iter_note_suggestions(source, novelty, vector_store=None))
     final = next(event for event in events if event.get("type") == "suggestions")

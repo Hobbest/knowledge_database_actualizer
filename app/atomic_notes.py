@@ -110,6 +110,7 @@ def plan_atomic_topics(
     novelty: NoveltyResult,
     *,
     budget: LLMBudget | None = None,
+    progress: Callable[[str, int, int, str], None] | None = None,
 ) -> list[AtomicTopic]:
     """Plan one note per distinct concept across the full source."""
     all_segments = [item.segment for item in segment_scores] or source.segments
@@ -122,7 +123,13 @@ def plan_atomic_topics(
     # Plan across the whole source in bounded windows (map), then reconcile with
     # structural coverage (reduce): keep the LLM's concept grouping while making
     # sure no segment is ever dropped from note generation.
-    llm_topics = _llm_plan_topics_windowed(source, all_segments, novelty, budget=budget)
+    llm_topics = _llm_plan_topics_windowed(
+        source,
+        all_segments,
+        novelty,
+        budget=budget,
+        progress=progress,
+    )
     topics = _reconcile_topics(llm_topics, structural_topics, all_segments)
 
     for topic in topics:
@@ -439,6 +446,7 @@ def _llm_plan_topics_windowed(
     novelty: NoveltyResult,
     *,
     budget: LLMBudget | None = None,
+    progress: Callable[[str, int, int, str], None] | None = None,
 ) -> list[AtomicTopic]:
     """Plan topics across the whole source in bounded LLM windows (the map step).
 
@@ -455,15 +463,45 @@ def _llm_plan_topics_windowed(
     max_calls = settings.llm_max_planning_calls
     topics: list[AtomicTopic] = []
     calls = 0
-    for window in windows:
+    window_total = len(windows)
+    for window_index, window in enumerate(windows, start=1):
         if max_calls and calls >= max_calls:
             logger.info(
                 "Planning call cap (%s) reached; remaining window(s) use structural planning",
                 max_calls,
             )
+            if progress:
+                progress(
+                    "planning",
+                    window_index - 1,
+                    window_total,
+                    (
+                        f"Planning call cap ({max_calls}) reached; "
+                        "remaining sections use structural planning"
+                    ),
+                )
             break
         if budget is not None and budget.exhausted:
             break
+
+        if progress:
+            progress(
+                "planning",
+                window_index,
+                window_total,
+                (
+                    f"LLM topic planning window {window_index}/{window_total} "
+                    f"({len(window)} segments, call {calls + 1}"
+                    + (f"/{max_calls}" if max_calls else "")
+                    + ")"
+                ),
+            )
+        logger.info(
+            "LLM planning window %s/%s (%s segments)",
+            window_index,
+            window_total,
+            len(window),
+        )
 
         before = budget.calls if budget is not None else -1
         window_topics = _llm_plan_topics(source, window, novelty, budget=budget)

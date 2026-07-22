@@ -200,10 +200,12 @@ function computeProgress(event) {
       return 15;
     case "scoring":
       return 15 + ratio * 25;
+    case "planning":
+      return 40 + ratio * 10;
     case "drafting":
-      return 40 + ratio * 60;
+      return 50 + ratio * 50;
     default:
-      return 0;
+      return Math.max(2, Math.round(ratio * 100));
   }
 }
 
@@ -211,12 +213,14 @@ function showProgress(event) {
   analyzeProgress.classList.remove("hidden");
   progressLabel.textContent = event.message || "Working...";
   progressCount.textContent = event.total > 0 ? `${event.current}/${event.total}` : "";
-  const progress = Math.round(computeProgress(event));
+  const progress = Math.max(2, Math.round(computeProgress(event)));
   progressBar.style.width = `${progress}%`;
   analyzeProgress.setAttribute("aria-valuenow", String(progress));
   analyzeProgress.setAttribute("aria-valuetext", progressLabel.textContent);
+  // Map LLM planning windows onto the Plan pill (same phase as scoring).
+  const stageKey = event.stage === "planning" ? "scoring" : event.stage;
   document.querySelectorAll("#progressStages [data-stage]").forEach((item) => {
-    const active = item.dataset.stage === event.stage;
+    const active = item.dataset.stage === stageKey;
     item.classList.toggle("font-semibold", active);
     item.classList.toggle("text-indigo-700", active);
   });

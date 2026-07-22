@@ -1,29 +1,7 @@
-function parseAppendTarget(target) {
-  if (!target) {
-    return { path: "", heading: null };
-  }
-  const raw = String(target).trim();
-  const hashIndex = raw.indexOf("#");
-  if (hashIndex < 0) {
-    return { path: raw, heading: null };
-  }
-  return {
-    path: raw.slice(0, hashIndex).trim(),
-    heading: raw.slice(hashIndex + 1).trim().replace(/^#+/, "").trim() || null,
-  };
-}
+const shared = require("../shared/api-client.js");
 
 function buildApplyNote(item, overwrite = false) {
-  const mode = item.write_mode === "append" ? "append" : "write";
-  const rawTarget = mode === "append" && item.append_target ? item.append_target : item.note_path;
-  const { path, heading } = parseAppendTarget(rawTarget);
-  return {
-    note_path: String(path || item.note_path || "").trim(),
-    content: String(item.content || ""),
-    mode,
-    overwrite: Boolean(overwrite),
-    append_heading: mode === "append" ? item.append_heading || heading || null : null,
-  };
+  return shared.buildApplyNote(item, overwrite);
 }
 
 function buildSelectedApplyNotes(suggestions, selectedIndexes, overwrite = false) {
@@ -31,6 +9,10 @@ function buildSelectedApplyNotes(suggestions, selectedIndexes, overwrite = false
     .map((index) => suggestions[index])
     .filter(Boolean)
     .map((item) => buildApplyNote(item, overwrite));
+}
+
+function consumeNdjsonLines(buffer, onEvent) {
+  return shared.consumeNdjsonLines(buffer, onEvent);
 }
 
 function editorMarkdown(view, selectionOnly = false) {
@@ -42,19 +24,6 @@ function editorMarkdown(view, selectionOnly = false) {
     return String(editor.getSelection ? editor.getSelection() : "");
   }
   return String(editor.getValue ? editor.getValue() : "");
-}
-
-function consumeNdjsonLines(buffer, onEvent) {
-  let rest = buffer;
-  let newlineIndex;
-  while ((newlineIndex = rest.indexOf("\n")) >= 0) {
-    const line = rest.slice(0, newlineIndex).trim();
-    rest = rest.slice(newlineIndex + 1);
-    if (line) {
-      onEvent(JSON.parse(line));
-    }
-  }
-  return rest;
 }
 
 function suggestionPageCount(total, pageSize) {
@@ -77,15 +46,7 @@ function suggestionPageSlice(total, page, pageSize) {
 }
 
 function isAnalyzeAbortError(error) {
-  if (!error) {
-    return false;
-  }
-  if (error.name === "AbortError") {
-    return true;
-  }
-  return /analysis canceled|The operation was aborted|aborted/i.test(
-    String(error.message || error)
-  );
+  return shared.isAbortError(error);
 }
 
 function parseNdjsonStream(text, onEvent) {
@@ -126,8 +87,9 @@ module.exports = {
   consumeNdjsonLines,
   editorMarkdown,
   isAnalyzeAbortError,
-  parseAppendTarget,
+  parseAppendTarget: shared.parseAppendTarget,
   parseNdjsonStream,
   suggestionPageCount,
   suggestionPageSlice,
+  extractErrorDetail: shared.extractErrorDetail,
 };

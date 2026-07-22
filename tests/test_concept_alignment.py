@@ -112,7 +112,7 @@ def test_llm_draft_topics_batch_matches_by_id(monkeypatch):
               {"id": "1", "title": "Alpha", "body": "# Beta\\n\\nBeta body"}
             ]"""
 
-    monkeypatch.setattr("app.suggest.get_llm_provider", lambda: FakeProvider())
+    monkeypatch.setattr("app.suggest.draft.get_llm_provider", lambda: FakeProvider())
 
     bodies = _llm_draft_topics_batch(source, topics, [])
     assert "Alpha body" in bodies["0"]
@@ -120,7 +120,7 @@ def test_llm_draft_topics_batch_matches_by_id(monkeypatch):
 
 
 def test_build_suggestion_syncs_h1_to_concept(monkeypatch):
-    monkeypatch.setattr("app.suggest.get_llm_provider", lambda: None)
+    monkeypatch.setattr("app.suggest.draft.get_llm_provider", lambda: None)
     monkeypatch.setattr("app.suggest.settings.include_media", False)
     source = LoadedSource(
         title="Src",

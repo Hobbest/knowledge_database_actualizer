@@ -317,7 +317,7 @@ ENV_SECTIONS: tuple[EnvSection, ...] = (
             "# When set, all /api/* requests need Authorization: Bearer <token> or X-API-Token.",
             "# The SPA shell (/) stays public; the UI prompts for the token on 401.",
         ),
-        fields=("api_token",),
+        fields=("api_token", "api_token_capabilities", "disable_plugin_discovery", "plugin_allowlist"),
     ),
     EnvSection(
         header=(
