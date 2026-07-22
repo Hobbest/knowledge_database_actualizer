@@ -15,6 +15,14 @@ class TextLimits:
     # Auto-generated topic title derived from the first meaningful line.
     topic_title_chars: int = 72
 
+    # Body-grounded titling (app/titling.py).
+    title_min_words: int = 3
+    title_max_words: int = 8
+    # Keep a heading/hint only when content-word overlap with the body meets this.
+    title_heading_jaccard: float = 0.25
+    # Below this coherence score, fall back to a phrase from summarize_text.
+    title_coherence_floor: float = 0.12
+
     # Source excerpt passed to the LLM when drafting a single note body.
     note_draft_excerpt_chars: int = 2000
 
