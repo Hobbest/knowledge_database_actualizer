@@ -351,8 +351,11 @@ It handles dependencies, builds, tests, and publishing crates.
     print(f"   media_items={len(media_source.media)} note_has_section={'## Tables & figures' in joined}")
     assert "## Tables & figures" in joined
     assert "| Cfg | Score |" in joined
-    # The pipe rows must not leak into the prose summary.
-    assert "## Summary" in joined and "| A | 9 |" in joined.split("## Tables & figures", 1)[1]
+    # The pipe rows must not leak into the progressive prose body.
+    prose, _, media = joined.partition("## Tables & figures")
+    assert "## Key points" in prose or ">" in prose
+    assert "| A | 9 |" in media
+    assert "| A | 9 |" not in prose.split("## Key points", 1)[0]
 
     print("8) Loading from bytes preserves segment locations...")
     md_bytes = (
@@ -401,8 +404,10 @@ It handles dependencies, builds, tests, and publishing crates.
     assert len(saved["suggestions"]) == len(final_rl["suggestions"])
     assert saved["completed"] is True
     assert all(note["content"] for note in saved["suggestions"])
-    # Fallback notes should be clean prose, not per-line PDF fragments.
-    assert "## Summary" in saved["suggestions"][0]["content"]
+    # Fallback notes should use progressive extractive shape, not raw fragments.
+    first = saved["suggestions"][0]["content"]
+    assert "## Key points" in first or ">" in first
+    assert "## Summary" not in first
 
     print("11) Transient rate limit is retried, then succeeds via the LLM...")
 

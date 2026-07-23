@@ -38,7 +38,12 @@ from app.note_output import (
     vault_relative_paths_equal,
 )
 from app.novelty import NoveltyResult, OverlappingNote, novelty_to_checkpoint
-from app.progressive import build_evidence_pack, format_for_prompt, pack_to_budget
+from app.progressive import (
+    build_evidence_pack,
+    format_for_prompt,
+    pack_to_budget,
+    render_progressive_note,
+)
 from app.prompts import NOTE_WRITER_SYSTEM_PROMPT, batch_note_draft_prompt, note_draft_prompt
 from app.sources.base import LoadedSource, SourceLocation, SourceSegment
 from app.suggest.models import NoteSuggestion
@@ -51,9 +56,7 @@ from app.suggest.plan import (
 from app.summarize import (
     compose_title,
     ensure_concept_heading,
-    key_points,
     refine_note_body,
-    summarize_text,
 )
 from app.text_limits import TEXT_LIMITS
 from app.text_utils import combine_segment_text
@@ -64,13 +67,44 @@ from app.wikilinks import format_wikilink
 logger = logging.getLogger(__name__)
 
 
-def _evidence_for_topic(topic: AtomicTopic, *, max_chars: int) -> str:
+def _media_hints_for_topic(
+    topic: AtomicTopic,
+    source: LoadedSource | None,
+) -> list[str]:
+    """Short figure/table captions for EvidencePack (not full media markdown)."""
+    if (
+        source is None
+        or not settings.include_media
+        or not source.media
+    ):
+        return []
+    items = media_for_location(topic_location(topic), source.media)
+    hints: list[str] = []
+    for item in items:
+        label = (item.label or item.kind or "").strip()
+        caption = (item.caption or "").strip()
+        if caption and label:
+            hints.append(f"{label}: {caption}")
+        elif caption:
+            hints.append(caption)
+        elif label:
+            hints.append(label)
+    return hints
+
+
+def _evidence_for_topic(
+    topic: AtomicTopic,
+    *,
+    max_chars: int,
+    source: LoadedSource | None = None,
+) -> str:
     """Build budget-packed progressive evidence from the full topic body."""
     text = combine_segment_text(topic.segments) or topic.summary or ""
     pack = build_evidence_pack(
         text,
         planner_summary=topic.summary or None,
         title=topic.title,
+        media_hints=_media_hints_for_topic(topic, source) or None,
     )
     packed = pack_to_budget(pack, max_chars)
     return format_for_prompt(packed)
@@ -414,6 +448,7 @@ def _llm_draft_topic_body(
     evidence = _evidence_for_topic(
         topic,
         max_chars=TEXT_LIMITS.note_draft_excerpt_chars,
+        source=source,
     )
     prompt = note_draft_prompt(
         source=source,
@@ -451,6 +486,7 @@ def _llm_draft_topic_body(
 def _batch_draft_payload(
     topics: list[AtomicTopic],
     *,
+    source: LoadedSource | None = None,
     vector_store: VectorStore | None = None,
     source_tags: list[str] | None = None,
 ) -> list[dict]:
@@ -463,7 +499,11 @@ def _batch_draft_payload(
     for index, topic in enumerate(topics):
         location = topic_location(topic)
         title = compose_title(topic.title)
-        evidence = _evidence_for_topic(topic, max_chars=batch_excerpt_chars)
+        evidence = _evidence_for_topic(
+            topic,
+            max_chars=batch_excerpt_chars,
+            source=source,
+        )
         item: dict = {
             "id": str(index),
             "title": title,
@@ -495,6 +535,7 @@ def _batch_draft_prompt_chars(
         source=source,
         topics=_batch_draft_payload(
             topics,
+            source=source,
             vector_store=vector_store,
             source_tags=source_tags,
         ),
@@ -593,6 +634,7 @@ def _llm_draft_topics_batch(
     batch_max_lines = min(30, settings.max_note_lines)
     payload = _batch_draft_payload(
         topics,
+        source=source,
         vector_store=vector_store,
         source_tags=source_tags,
     )
@@ -662,32 +704,21 @@ def _llm_draft_topics_batch(
     return bodies
 
 
-def _fallback_topic_body(topic: AtomicTopic) -> str:
-    # Summarize from the full topic text (not the pre-truncated topic.summary) so
-    # the extractive scorer sees every sentence before picking the salient ones.
+def _fallback_topic_body(
+    topic: AtomicTopic,
+    *,
+    source: LoadedSource | None = None,
+) -> str:
+    """Extractive progressive note from the full topic text (no LLM)."""
     full_text = combine_segment_text(topic.segments) or topic.summary or ""
     title = compose_title(topic.title)
-
-    summary = summarize_text(
+    pack = build_evidence_pack(
         full_text,
-        max_sentences=TEXT_LIMITS.summary_sentence_count,
-        max_chars=TEXT_LIMITS.summary_max_chars,
+        planner_summary=topic.summary or None,
+        title=title,
+        media_hints=_media_hints_for_topic(topic, source) or None,
     )
-
-    # Key points must add information beyond the summary, not restate it.
-    points = key_points(
-        full_text,
-        max_points=TEXT_LIMITS.fallback_bullet_count,
-        min_chars=TEXT_LIMITS.key_point_min_chars,
-        exclude=summary,
-    )
-
-    sections = [f"# {title}", "", "## Summary", "", summary or title]
-    if points:
-        sections += ["", "## Key points", ""]
-        sections += [f"- {point}" for point in points]
-
-    return refine_note_body("\n".join(sections))
+    return render_progressive_note(title, pack)
 
 
 def draft_note_suggestion(
@@ -755,7 +786,7 @@ def _build_suggestion(
             budget=budget,
             vault_context=vault_context,
         )
-    body = body or _fallback_topic_body(topic)
+    body = body or _fallback_topic_body(topic, source=source)
     body = _strip_source_section(body)
 
     # Single refinement pass gives LLM and extractive notes the same consistent

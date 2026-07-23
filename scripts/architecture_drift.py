@@ -47,6 +47,7 @@ CURATED_MODULES = frozenset(
         "obsidian_uri",
         "plugin_api",
         "preflight",
+        "progressive",
         "prompt_domains",
         "prompts",
         "qdrant_store",

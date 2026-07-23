@@ -10,10 +10,10 @@ todos:
     status: completed
   - id: prompts-fallback
     content: "Phase 2: Prompt structured evidence + ATOMIC_NOTE_RULES; _fallback_topic_body → render_progressive_note"
-    status: pending
+    status: completed
   - id: arch-docs-followup
     content: "Phase 3: ARCHITECTURE §7/§17 EvidencePack extension; optional media_hints; document gated LLM deep-read (default off)"
-    status: pending
+    status: completed
   - id: optional-llm-deep-read
     content: "Follow-up only: DRAFT_LLM_DEEP_READ gated claims pass for novel topics (skip when batching / low budget)"
     status: pending

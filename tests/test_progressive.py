@@ -131,6 +131,49 @@ def test_media_hints_optional_and_budget_droppable():
     assert len(format_for_prompt(tiny)) <= 180
 
 
+def test_evidence_for_topic_includes_media_hints(monkeypatch):
+    from app.atomic_notes import AtomicTopic
+    from app.sources.base import LoadedSource, MediaItem, SourceLocation, SourceSegment
+    from app.suggest import draft as draft_mod
+    from app.suggest.draft import _evidence_for_topic
+    from app.text_limits import TEXT_LIMITS
+
+    monkeypatch.setattr(draft_mod.settings, "include_media", True)
+    location = SourceLocation(page=1)
+    topic = AtomicTopic(
+        title="Adam",
+        segments=[
+            SourceSegment(
+                text="Adam is an adaptive optimizer combining momentum and RMSprop.",
+                location=location,
+                index=0,
+            )
+        ],
+        summary="Adam optimizer",
+    )
+    source = LoadedSource(
+        title="Src",
+        text="body",
+        source_type="text",
+        source_ref="a.txt",
+        media=[
+            MediaItem(
+                kind="figure",
+                label="Figure 1",
+                caption="Loss curves for Adam vs SGD",
+                location=location,
+            )
+        ],
+    )
+    evidence = _evidence_for_topic(
+        topic,
+        max_chars=TEXT_LIMITS.note_draft_excerpt_chars,
+        source=source,
+    )
+    assert "Media hints" in evidence
+    assert "Loss curves" in evidence or "Figure 1" in evidence
+
+
 def test_draft_evidence_includes_late_salient_claim():
     from app.atomic_notes import AtomicTopic
     from app.sources.base import SourceLocation, SourceSegment
@@ -200,3 +243,95 @@ def test_batch_draft_payload_respects_batch_budget():
         assert len(item["evidence"]) <= TEXT_LIMITS.batch_draft_excerpt_chars
         assert "summary" not in item
         assert "excerpt" not in item
+
+
+def test_atomic_note_rules_describe_progressive_shape():
+    from app.prompts import ATOMIC_NOTE_RULES
+
+    joined = " ".join(ATOMIC_NOTE_RULES).casefold()
+    assert "blockquote" in joined or ">" in joined or "executive" in joined
+    assert "key points" in joined
+    assert "nucleus" in joined or "bold" in joined
+    assert "paraphrase" in joined
+
+
+def test_fallback_topic_body_progressive_shape():
+    from app.atomic_notes import AtomicTopic
+    from app.sources.base import SourceLocation, SourceSegment
+    from app.suggest.draft import _fallback_topic_body
+
+    topic = AtomicTopic(
+        title="Cosine Similarity",
+        segments=[
+            SourceSegment(
+                text=(
+                    "Cosine similarity is a measure of the angle between embedding vectors. "
+                    "It ignores magnitude and focuses on orientation. "
+                    "However, sparse vectors can make the score unstable without smoothing."
+                ),
+                location=SourceLocation(page=1),
+                index=0,
+            )
+        ],
+        summary="Cosine similarity measures embedding orientation.",
+    )
+    body = _fallback_topic_body(topic)
+    assert body.lstrip().startswith("# Cosine Similarity")
+    assert ">" in body
+    assert "**" in body
+    assert "## Key points" in body
+    assert "## Summary" not in body
+
+
+def test_fallback_progressive_note_quality_spot_check():
+    from app.atomic_notes import AtomicTopic
+    from app.note_intelligence import score_note_quality
+    from app.sources.base import LoadedSource, SourceLocation, SourceSegment
+    from app.suggest.draft import _build_suggestion, _fallback_topic_body
+
+    topic = AtomicTopic(
+        title="Momentum",
+        segments=[
+            SourceSegment(
+                text=(
+                    "Momentum accumulates a velocity vector from past gradients. "
+                    "It dampens oscillations and accelerates descent in consistent directions. "
+                    "However, a high momentum coefficient can overshoot sharp minima."
+                ),
+                location=SourceLocation(page=1),
+                index=0,
+            )
+        ],
+        summary="Momentum accumulates velocity from past gradients.",
+    )
+    body = _fallback_topic_body(topic)
+    # Mimic drafted note structure after frontmatter would be added in apply —
+    # quality scoring looks at concept_title vs body prose.
+    wrapped = (
+        "---\ntype: atomic\n---\n"
+        f"{body}"
+        "## Related notes\n\n- [[topics/Other]]\n\n"
+        "## Source\n\n- File: `a.md`\n"
+    )
+    quality = score_note_quality(concept_title="Momentum", content=wrapped)
+    assert "heading_mismatch" not in quality["quality_flags"]
+    assert "title_ungrounded" not in quality["quality_flags"]
+
+    source = LoadedSource(
+        title="Src",
+        text="Momentum text",
+        source_type="text",
+        source_ref="a.txt",
+    )
+    suggestion = _build_suggestion(
+        source,
+        topic,
+        [],
+        set(),
+        use_llm=False,
+        vector_store=None,
+    )
+    assert suggestion.concept_title == "Momentum"
+    assert "# Momentum" in suggestion.content
+    assert ">" in suggestion.content
+    assert "**" in suggestion.content

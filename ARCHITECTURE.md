@@ -42,6 +42,7 @@ flowchart TB
         REL["relevance.py"]
         ATOM["atomic_notes.py"]
         TITLE["titling.py<br/>body-grounded titles"]
+        PROG["progressive.py<br/>EvidencePack layers"]
         OUT["note_output.py<br/>paths · templates · append"]
         SUG["suggest.py<br/>draft · apply · MOC"]
         BLK["block_refs.py"]
@@ -64,6 +65,7 @@ flowchart TB
     API --> SRC & VLT & NOV & SUG & GR & META & THR
     SUG --> ATOM & OUT & OBS & BLK & BUD & LLM & CK
     ATOM --> SEG & REL & TITLE
+    SUG --> PROG
     NOV --> VS & SIM & THR
     VS --> EMB & CHROMA
     VLT --> VAULT
@@ -154,6 +156,7 @@ app/
 ├── media.py                  Tables & figure captions → notes
 ├── atomic_notes.py           Topic planning (structural + optional LLM); segment scoring
 ├── titling.py                Body-grounded topic titles (planning-time; no extra LLM)
+├── progressive.py            EvidencePack: skim/deep-read layers for drafting (extractive)
 ├── summarize.py              Extractive fallback drafting helpers
 ├── suggest/                  Draft · plan · apply package (stable `app.suggest` façade)
 ├── llm.py                    Providers + rate-limit retry helpers (+ plugins)
@@ -173,7 +176,7 @@ scripts/smoke_test.py       Optional integration (real MiniLM)
 |---------|---------|
 | Ingestion | `sources`, `source_identity`, `vault`, `wikilinks`, `chunking`, `url_security` |
 | Retrieval & judgement | `embeddings`, `vectorstore`, `qdrant_store`, `vector_protocol`, `indexing`, `similarity`, `novelty`, `thresholds`, `threshold_calibration`, `index_meta`, `vault_fingerprints`, `vault_index` |
-| Note generation | `segmentation`, `relevance`, `media`, `atomic_notes`, `titling`, `summarize`, `note_output`, `suggest`, `note_intelligence`, `llm`, `llm_budget`, `prompt_domains`, `json_extract` |
+| Note generation | `segmentation`, `relevance`, `media`, `atomic_notes`, `titling`, `progressive`, `summarize`, `note_output`, `suggest`, `note_intelligence`, `llm`, `llm_budget`, `prompt_domains`, `json_extract` |
 | Obsidian integration | `obsidian_uri`, `obsidian_templates`, `note_output`, `block_refs`, `wikilinks`, `git_integration` |
 | HTTP & ops | `main`, `api`, `observability`, `analytics`, `chat`, `reports`, `vault_watcher`, `plugin_api`, `preflight`, `settings_persistence` |
 | Concurrency & durability | `runtime`, `checkpoint` |
@@ -401,7 +404,7 @@ flowchart LR
     I -->|no| K["structural topics"]
     J --> L["drop boilerplate titles<br/>+ MAX_NOTES_PER_SOURCE"]
     K --> L
-    L --> M["draft each topic<br/>LLMBudget gates complete()"]
+    L --> M["draft each topic<br/>EvidencePack → LLM or extractive"]
     M --> N["frontmatter + template<br/>+ Related + Source"]
     N --> O["append_target if overlap<br/>topic_overlap_match"]
     O --> P["checkpoint.add()"]
@@ -412,7 +415,12 @@ flowchart LR
 - **Segmentation** turns large units (e.g. full PDF pages) into bounded planning
   units (`SEGMENT_TARGET_CHARS`).
 - **Planning** prefers structural coverage; LLM plans are accepted only when they
-  yield enough distinct topics.
+  yield enough distinct topics. Titles are grounded by `titling.py` at plan time.
+- **Drafting** builds an extractive `EvidencePack` (`progressive.py`) from the
+  **full** topic text (definitions / claims / numbers — not a prefix truncate),
+  packs it to the draft char budget, then synthesizes via LLM or
+  `render_progressive_note`. Optional figure/table captions may appear as
+  `media_hints` in the pack; media markdown is still appended post-draft.
 - **Output paths** default to `{NOTE_OUTPUT_FOLDER}/{source-slug}/{concept}.md`.
 - **Templates:** `NOTE_TEMPLATE_PATH` or vault `.obsidian/app.json` template
   folder (`USE_OBSIDIAN_TEMPLATES`); placeholders `{{body}}`, `{{title}}`,
@@ -422,7 +430,10 @@ flowchart LR
   `GET /api/vault/note` and apply with `mode=append`.
 - **MOC:** when `GENERATE_MOC=true` and enough concept notes exist, an
   `{source}/index.md` map-of-content is proposed (deselected by default).
-- **Budget** caps LLM spend; remaining notes fall back to extractive summaries.
+- **Budget** caps LLM spend; remaining notes fall back to extractive progressive
+  notes (same EvidencePack shape). An optional gated LLM “deep read” claims pass
+  (`DRAFT_LLM_DEEP_READ`) is **not implemented** — document-only follow-up;
+  default path stays extractive packing with no extra call per note.
 - Embedding / LLM **rate limits** use shared retry helpers; exhausted embedding
   queries yield **unknown** similarity (not forced-novel).
 
@@ -677,6 +688,13 @@ Pinned runtime deps live in `requirements.txt` / `pyproject.toml`;
   `actualizer.llm_providers`, `actualizer.vector_stores`.
 - **Prompt domain packs:** bundled JSON under `prompts/domains/`, user packs under
   `DATA_DIR/domains/`, or entry point `actualizer.prompt_domains`.
+- **Evidence packing / progressive draft layers:** `app/progressive.py`
+  (`EvidencePack`, `EVIDENCE_PACK_VERSION`) — tune scoring, layer sizes
+  (`TEXT_LIMITS.evidence_*`), or packing priority without growing `suggest/draft.py`.
+  Draft-only: do **not** bump `analysis_fingerprint` when changing pack contents.
+- **Optional LLM deep-read (future):** a gated `DRAFT_LLM_DEEP_READ` claims pass
+  for novel topics could sit between packing and synthesize; default remains off
+  and must skip when batching or budget is low. Not shipped.
 - **Tuning volume/cost:** `SEGMENT_TARGET_CHARS`, `MAX_NOTES_PER_SOURCE`,
   atomic limits, and LLM budget caps.
 - **Similarity tuning:** tag boost knobs, threshold calibration sample size, or
