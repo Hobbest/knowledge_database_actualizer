@@ -84,7 +84,10 @@ def test_batch_prompt_requires_stable_id():
     )
     prompt = batch_note_draft_prompt(
         source=source,
-        topics=[{"id": "0", "title": "A", "excerpt": "a"}, {"id": "1", "title": "B", "excerpt": "b"}],
+        topics=[
+            {"id": "0", "title": "A", "evidence": "a"},
+            {"id": "1", "title": "B", "evidence": "b"},
+        ],
         related_links=[],
         max_note_lines=40,
     )

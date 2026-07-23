@@ -214,12 +214,13 @@ def test_note_draft_prompt_wraps_excerpt():
         source=source,
         concept_title="Concept",
         location_display="line 1",
-        excerpt="Untrusted payload",
+        evidence="Untrusted payload",
         related_links=[],
         max_note_lines=40,
     )
     assert UNTRUSTED_OPEN in prompt
     assert "Untrusted payload" in prompt
+    assert "source evidence" in prompt
     assert "untrusted" in prompt.lower()
 
 

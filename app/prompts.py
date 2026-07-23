@@ -134,7 +134,7 @@ def batch_note_draft_prompt(
         f"Source: {_sanitize_untrusted(source.title)} ({source.source_type})\n"
         f"Related notes: {links_text}\n"
         f"{context_block}\n"
-        f"{wrap_untrusted('concepts and excerpts', topics_json)}\n\n"
+        f"{wrap_untrusted('concepts and evidence', topics_json)}\n\n"
         "Output format — return ONLY note blocks in exactly this shape, with no "
         "JSON, no code fences, and no text before or after:\n\n"
         "===NOTE <id>===\n"
@@ -160,13 +160,20 @@ def note_draft_prompt(
     source: LoadedSource,
     concept_title: str,
     location_display: str,
-    excerpt: str,
     related_links: list[str],
     max_note_lines: int,
+    evidence: str = "",
+    excerpt: str = "",
     vault_context: str = "",
 ) -> str:
+    """Build a single-note draft prompt.
+
+    Prefer ``evidence`` (progressive pack). ``excerpt`` remains as a deprecated
+    alias for older call sites/tests.
+    """
     links_text = ", ".join(related_links) if related_links else "none"
     safe_title = _sanitize_untrusted(concept_title)
+    payload = (evidence or excerpt or "").strip()
     context_block = ""
     if vault_context.strip():
         context_block = (
@@ -179,7 +186,7 @@ def note_draft_prompt(
         f"Checkable location in source: {_sanitize_untrusted(location_display)}\n"
         f"Related notes: {links_text}\n"
         f"{context_block}\n"
-        f"{wrap_untrusted('source excerpt', excerpt)}\n\n"
+        f"{wrap_untrusted('source evidence', payload)}\n\n"
         "Requirements:\n"
         f"{_format_rules(_domain_rules(ATOMIC_NOTE_RULES))}\n"
         f"- Start with '# {safe_title}'\n"

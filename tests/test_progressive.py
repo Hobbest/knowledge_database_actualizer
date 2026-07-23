@@ -1,0 +1,202 @@
+"""Unit tests for progressive EvidencePack packing (Phase 0 — no draft wire)."""
+
+from __future__ import annotations
+
+from app.progressive import (
+    EVIDENCE_PACK_VERSION,
+    build_evidence_pack,
+    format_for_prompt,
+    pack_to_budget,
+    render_progressive_note,
+)
+from app.text_limits import TEXT_LIMITS
+
+
+def test_evidence_pack_version_is_set():
+    assert isinstance(EVIDENCE_PACK_VERSION, str)
+    assert EVIDENCE_PACK_VERSION
+
+
+def test_late_salient_claim_beats_opening_filler():
+    filler = " ".join(
+        [
+            "This chapter introduces background material for orientation only.",
+            "Readers may skim these remarks without missing the core result.",
+            "The preamble continues with generic commentary about the field.",
+            "Historical anecdotes and soft motivation fill several sentences here.",
+        ]
+        * 3
+    )
+    late = (
+        "AdaGrad is an adaptive gradient method that scales each parameter "
+        "update by the inverse square root of accumulated squared gradients. "
+        "However, its accumulation can cause the effective learning rate to "
+        "decay too quickly on non-convex problems."
+    )
+    body = f"{filler} {late}"
+    pack = build_evidence_pack(body)
+    blob = " ".join([pack.l3_executive, *pack.l2_essentials, *pack.l1_salient]).casefold()
+    assert "adagrad" in blob or "adaptive gradient" in blob
+    assert "however" in blob or "decay" in blob or "learning rate" in blob
+    # Opening filler should not be the only evidence.
+    assert "anecdotes" not in blob or "adagrad" in blob
+
+
+def test_pack_to_budget_respects_single_and_batch_caps():
+    sentences = [
+        f"Definition {i} is a precise claim about method {i} with numeric rate {i}.0 percent."
+        for i in range(1, 20)
+    ]
+    body = " ".join(sentences)
+    pack = build_evidence_pack(body)
+
+    for limit in (
+        TEXT_LIMITS.note_draft_excerpt_chars,
+        TEXT_LIMITS.batch_draft_excerpt_chars,
+        400,
+        200,
+    ):
+        packed = pack_to_budget(pack, limit)
+        assert len(format_for_prompt(packed)) <= limit
+
+
+def test_grounded_planner_summary_kept_in_l3():
+    body = (
+        "Momentum accumulates a velocity vector from past gradients. "
+        "It dampens oscillations and accelerates descent in consistent directions."
+    )
+    summary = "Momentum accumulates velocity from past gradients to dampen oscillations."
+    pack = build_evidence_pack(body, planner_summary=summary)
+    assert "momentum" in pack.l3_executive.casefold()
+    assert "velocity" in pack.l3_executive.casefold()
+
+
+def test_ungrounded_planner_summary_replaced():
+    body = (
+        "Batch normalization renormalizes layer activations using mini-batch statistics. "
+        "It reduces internal covariate shift during deep network training."
+    )
+    pack = build_evidence_pack(
+        body,
+        planner_summary="Unrelated astronomy facts about distant galaxies and nebulae.",
+    )
+    assert "astronomy" not in pack.l3_executive.casefold()
+    assert (
+        "batch" in pack.l3_executive.casefold()
+        or "normalization" in pack.l3_executive.casefold()
+        or "activations" in pack.l3_executive.casefold()
+    )
+
+
+def test_render_progressive_note_has_blockquote_and_bold_nucleus():
+    filler = " ".join(
+        ["Generic preamble sentence number %d fills space without claims." % i for i in range(12)]
+    )
+    core = (
+        "Cosine similarity is a measure of the angle between embedding vectors. "
+        "It ignores magnitude and focuses on orientation. "
+        "However, sparse vectors can make the score unstable without smoothing."
+    )
+    body = f"{filler} {core}"
+    pack = build_evidence_pack(body)
+    note = render_progressive_note("Cosine Similarity", pack)
+    assert note.lstrip().startswith("# Cosine Similarity")
+    assert ">" in note
+    assert "**" in note
+    assert "## Key points" in note
+    # Progressive note compresses — does not embed the full L0 source.
+    assert body not in note
+    assert "preamble sentence number 0" not in note or "cosine" in note.casefold()
+    assert len(note) < len(body)
+
+
+def test_format_for_prompt_includes_layer_labels():
+    pack = build_evidence_pack(
+        "Gradient descent is an optimization algorithm that minimizes a loss."
+    )
+    formatted = format_for_prompt(pack)
+    assert "Executive summary" in formatted
+    assert "Essential claims" in formatted
+    assert "Salient source passages" in formatted
+
+
+def test_media_hints_optional_and_budget_droppable():
+    pack = build_evidence_pack(
+        "Adam is an adaptive optimizer combining momentum and RMSprop ideas.",
+        media_hints=["Figure 1: Loss curves for Adam vs SGD."],
+    )
+    assert pack.media_hints
+    assert "Media hints" in format_for_prompt(pack)
+    tiny = pack_to_budget(pack, 180)
+    assert len(format_for_prompt(tiny)) <= 180
+
+
+def test_draft_evidence_includes_late_salient_claim():
+    from app.atomic_notes import AtomicTopic
+    from app.sources.base import SourceLocation, SourceSegment
+    from app.suggest.draft import _batch_draft_payload, _evidence_for_topic
+    from app.text_limits import TEXT_LIMITS
+
+    filler = " ".join(
+        [
+            "This chapter introduces background material for orientation only.",
+            "Readers may skim these remarks without missing the core result.",
+        ]
+        * 4
+    )
+    late = (
+        "AdaGrad is an adaptive gradient method that scales each parameter "
+        "update by the inverse square root of accumulated squared gradients."
+    )
+    topic = AtomicTopic(
+        title="AdaGrad",
+        segments=[
+            SourceSegment(
+                text=f"{filler} {late}",
+                location=SourceLocation(page=1),
+                index=0,
+            )
+        ],
+        summary="Background orientation remarks.",
+    )
+    evidence = _evidence_for_topic(
+        topic,
+        max_chars=TEXT_LIMITS.note_draft_excerpt_chars,
+    )
+    assert "adagrad" in evidence.casefold() or "adaptive gradient" in evidence.casefold()
+    assert "Executive summary" in evidence
+
+    batch = _batch_draft_payload([topic])
+    assert len(batch) == 1
+    assert "evidence" in batch[0]
+    assert "excerpt" not in batch[0]
+    assert len(batch[0]["evidence"]) <= TEXT_LIMITS.batch_draft_excerpt_chars
+    assert "adagrad" in batch[0]["evidence"].casefold() or "adaptive" in batch[0]["evidence"].casefold()
+
+
+def test_batch_draft_payload_respects_batch_budget():
+    from app.atomic_notes import AtomicTopic
+    from app.sources.base import SourceLocation, SourceSegment
+    from app.suggest.draft import _batch_draft_payload
+    from app.text_limits import TEXT_LIMITS
+
+    text = " ".join(
+        f"Claim {i} is a precise statement about method {i} with rate {i}.5 percent."
+        for i in range(30)
+    )
+    topics = [
+        AtomicTopic(
+            title=f"Topic {i}",
+            segments=[
+                SourceSegment(text=text, location=SourceLocation(page=1), index=i)
+            ],
+            summary=f"Topic {i} overview",
+        )
+        for i in range(3)
+    ]
+    payload = _batch_draft_payload(topics)
+    assert len(payload) == 3
+    for item in payload:
+        assert len(item["evidence"]) <= TEXT_LIMITS.batch_draft_excerpt_chars
+        assert "summary" not in item
+        assert "excerpt" not in item

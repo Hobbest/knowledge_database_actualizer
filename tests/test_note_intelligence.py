@@ -148,7 +148,7 @@ def test_draft_prompts_include_vault_context():
         source=source,
         concept_title="Concept",
         location_display="page 1",
-        excerpt="excerpt",
+        evidence="excerpt",
         related_links=["[[topics/Related]]"],
         max_note_lines=40,
         vault_context="- [[topics/Related]] (Related)\n  Existing definition.",
@@ -158,7 +158,7 @@ def test_draft_prompts_include_vault_context():
 
     batch = batch_note_draft_prompt(
         source=source,
-        topics=[{"id": "0", "title": "Concept", "excerpt": "x"}],
+        topics=[{"id": "0", "title": "Concept", "evidence": "x"}],
         related_links=[],
         max_note_lines=30,
         vault_context="- [[topics/Related]]",

@@ -38,6 +38,7 @@ from app.note_output import (
     vault_relative_paths_equal,
 )
 from app.novelty import NoveltyResult, OverlappingNote, novelty_to_checkpoint
+from app.progressive import build_evidence_pack, format_for_prompt, pack_to_budget
 from app.prompts import NOTE_WRITER_SYSTEM_PROMPT, batch_note_draft_prompt, note_draft_prompt
 from app.sources.base import LoadedSource, SourceLocation, SourceSegment
 from app.suggest.models import NoteSuggestion
@@ -55,12 +56,24 @@ from app.summarize import (
     summarize_text,
 )
 from app.text_limits import TEXT_LIMITS
-from app.text_utils import combine_segment_text, extract_topic_summary
+from app.text_utils import combine_segment_text
 from app.update_detection import detect_update
 from app.vector_protocol import VectorStoreProtocol as VectorStore
 from app.wikilinks import format_wikilink
 
 logger = logging.getLogger(__name__)
+
+
+def _evidence_for_topic(topic: AtomicTopic, *, max_chars: int) -> str:
+    """Build budget-packed progressive evidence from the full topic body."""
+    text = combine_segment_text(topic.segments) or topic.summary or ""
+    pack = build_evidence_pack(
+        text,
+        planner_summary=topic.summary or None,
+        title=topic.title,
+    )
+    packed = pack_to_budget(pack, max_chars)
+    return format_for_prompt(packed)
 
 
 def _note_identity(segment_indices: list[int], concept_title: str) -> tuple:
@@ -398,21 +411,15 @@ def _llm_draft_topic_body(
 
     location = topic_location(topic)
     title = compose_title(topic.title)
-    excerpt = extract_topic_summary(
-        topic.segments,
+    evidence = _evidence_for_topic(
+        topic,
         max_chars=TEXT_LIMITS.note_draft_excerpt_chars,
     )
-    if topic.summary and topic.summary.strip() not in excerpt:
-        # Prefer the planner summary as concept intent; keep excerpt for evidence.
-        excerpt = (
-            f"Concept summary: {topic.summary.strip()}\n\n"
-            f"Source excerpt:\n{excerpt}"
-        )
     prompt = note_draft_prompt(
         source=source,
         concept_title=title,
         location_display=location.display(),
-        excerpt=excerpt,
+        evidence=evidence,
         related_links=related_links,
         max_note_lines=settings.max_note_lines,
         vault_context=vault_context,
@@ -448,23 +455,21 @@ def _batch_draft_payload(
     source_tags: list[str] | None = None,
 ) -> list[dict]:
     """Build the JSON payload for a batch draft prompt."""
-    batch_excerpt_chars = min(700, TEXT_LIMITS.note_draft_excerpt_chars)
+    batch_excerpt_chars = min(
+        TEXT_LIMITS.batch_draft_excerpt_chars,
+        TEXT_LIMITS.note_draft_excerpt_chars,
+    )
     payload: list[dict] = []
     for index, topic in enumerate(topics):
         location = topic_location(topic)
         title = compose_title(topic.title)
-        excerpt = extract_topic_summary(
-            topic.segments,
-            max_chars=batch_excerpt_chars,
-        )
+        evidence = _evidence_for_topic(topic, max_chars=batch_excerpt_chars)
         item: dict = {
             "id": str(index),
             "title": title,
             "location": location.display(),
-            "excerpt": excerpt,
+            "evidence": evidence,
         }
-        if topic.summary and topic.summary.strip():
-            item["summary"] = topic.summary.strip()[:400]
         vault_context = _vault_context_for_topic(
             vector_store,
             topic,

@@ -26,6 +26,15 @@ class TextLimits:
     # Source excerpt passed to the LLM when drafting a single note body.
     note_draft_excerpt_chars: int = 2000
 
+    # Per-topic evidence budget in batch draft prompts (was magic 700).
+    batch_draft_excerpt_chars: int = 700
+
+    # Progressive EvidencePack layer sizes (app/progressive.py).
+    evidence_l2_max: int = 7
+    evidence_l1_max: int = 10
+    evidence_l3_max_sentences: int = 3
+    evidence_nucleus_max_words: int = 6
+
     # Fallback bullet text when extractive parsing finds no list items.
     fallback_bullet_chars: int = 220
 
