@@ -16,7 +16,7 @@ todos:
     status: completed
   - id: optional-llm-deep-read
     content: "Follow-up only: DRAFT_LLM_DEEP_READ gated claims pass for novel topics (skip when batching / low budget)"
-    status: pending
+    status: completed
 isProject: false
 ---
 

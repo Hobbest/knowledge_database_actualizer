@@ -288,6 +288,8 @@ ENV_SECTIONS: tuple[EnvSection, ...] = (
             "# DRAFT_RAG_* — inject vault excerpts into LLM draft prompts for cross-refs",
             "# DUPLICATE_* — flag near-duplicate proposed notes after drafting",
             "# NOTE_QUALITY_SCORING_ENABLED — heuristic structure score on each draft",
+            "# DRAFT_LLM_DEEP_READ — optional LLM claims pass for novel topics before",
+            "#   single-note synthesize (default false; skipped when batch size > 1)",
             "# Domain-specific embeddings: set EMBEDDING_PROVIDER/EMBEDDING_MODEL to any",
             "# supported local HF or Gemini model (no fine-tuning pipeline required).",
         ),
@@ -298,6 +300,7 @@ ENV_SECTIONS: tuple[EnvSection, ...] = (
             "duplicate_detection_enabled",
             "duplicate_similarity_threshold",
             "note_quality_scoring_enabled",
+            "draft_llm_deep_read",
         ),
     ),
     EnvSection(

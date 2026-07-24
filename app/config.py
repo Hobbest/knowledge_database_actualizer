@@ -131,7 +131,7 @@ class Settings(BaseSettings):
     auto_tagging_max_tags: int = 8
 
     # Optional bundled prompt specialization: research | programming | history.
-    prompt_domain: str = ""
+    prompt_domain: str = "programming"
 
     # Vault-relative folder for new notes (e.g. sources → sources/<source>/<concept>.md).
     note_output_folder: str = "sources"
@@ -179,6 +179,10 @@ class Settings(BaseSettings):
     duplicate_similarity_threshold: float = 0.85
     # Heuristic 0–1 quality score on drafted notes (structure / related links).
     note_quality_scoring_enabled: bool = True
+    # Optional LLM "deep read" claims pass before single-note synthesize.
+    # Default off: extractive EvidencePack only. Skipped when batch drafting
+    # (llm_draft_batch_size > 1), topic is not novel, or budget is low.
+    draft_llm_deep_read: bool = False
 
     # When > 0, inline bounded excerpts from ![[embedded]] notes into embeddings.
     transclude_depth: int = 0

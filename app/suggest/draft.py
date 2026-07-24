@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
@@ -44,7 +45,13 @@ from app.progressive import (
     pack_to_budget,
     render_progressive_note,
 )
-from app.prompts import NOTE_WRITER_SYSTEM_PROMPT, batch_note_draft_prompt, note_draft_prompt
+from app.prompts import (
+    DEEP_READ_SYSTEM_PROMPT,
+    NOTE_WRITER_SYSTEM_PROMPT,
+    batch_note_draft_prompt,
+    deep_read_claims_prompt,
+    note_draft_prompt,
+)
 from app.sources.base import LoadedSource, SourceLocation, SourceSegment
 from app.suggest.models import NoteSuggestion
 from app.suggest.plan import (
@@ -108,6 +115,142 @@ def _evidence_for_topic(
     )
     packed = pack_to_budget(pack, max_chars)
     return format_for_prompt(packed)
+
+
+def _should_llm_deep_read(
+    topic: AtomicTopic,
+    *,
+    budget: LLMBudget | None,
+) -> bool:
+    """Gates for the optional LLM claims pass (default path stays extractive)."""
+    if not settings.draft_llm_deep_read:
+        return False
+    # Batch drafting never deep-reads; cost policy forbids a second call path.
+    if settings.llm_draft_batch_size > 1:
+        return False
+    if not topic.is_novel:
+        return False
+    if budget is not None:
+        if budget.exhausted:
+            return False
+        # Need room for claims extraction + synthesize.
+        if budget.remaining_calls < 2:
+            return False
+    return True
+
+
+def _parse_deep_read_claims(raw: str) -> dict[str, list[str]] | None:
+    """Parse ``{claims, terms, caveats}`` from a model response."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    # Drop optional fences.
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, count=1, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text, count=1)
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        payload = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    def _as_strings(value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        items: list[str] = []
+        for item in value:
+            cleaned = str(item or "").strip()
+            if cleaned:
+                items.append(cleaned[:200])
+        return items
+
+    claims = _as_strings(payload.get("claims"))
+    terms = _as_strings(payload.get("terms"))
+    caveats = _as_strings(payload.get("caveats"))
+    if not claims and not terms and not caveats:
+        return None
+    return {"claims": claims, "terms": terms, "caveats": caveats}
+
+
+def _format_claims_block(claims: dict[str, list[str]]) -> str:
+    lines = ["LLM deep-read extraction (ground synthesis here; do not invent beyond this):"]
+    if claims.get("claims"):
+        lines.append("Claims:")
+        lines.extend(f"- {item}" for item in claims["claims"])
+    if claims.get("terms"):
+        lines.append("Terms:")
+        lines.extend(f"- {item}" for item in claims["terms"])
+    if claims.get("caveats"):
+        lines.append("Caveats:")
+        lines.extend(f"- {item}" for item in claims["caveats"])
+    return "\n".join(lines).strip() + "\n"
+
+
+def _llm_deep_read_claims(
+    source: LoadedSource,
+    topic: AtomicTopic,
+    *,
+    budget: LLMBudget | None = None,
+) -> str | None:
+    """One JSON call extracting claims/terms/caveats from a larger evidence pack."""
+    provider = get_llm_provider()
+    if not provider:
+        return None
+
+    location = topic_location(topic)
+    title = compose_title(topic.title)
+    evidence = _evidence_for_topic(
+        topic,
+        max_chars=max(
+            TEXT_LIMITS.note_draft_excerpt_chars,
+            TEXT_LIMITS.deep_read_excerpt_chars,
+        ),
+        source=source,
+    )
+    prompt = deep_read_claims_prompt(
+        source=source,
+        concept_title=title,
+        location_display=location.display(),
+        evidence=evidence,
+    )
+    prompt_chars = len(prompt) + len(DEEP_READ_SYSTEM_PROMPT)
+    if budget is not None and not budget.can_call(prompt_chars):
+        logger.info(
+            "Skipping LLM deep-read for '%s': prompt needs %s chars",
+            title,
+            prompt_chars,
+        )
+        return None
+
+    logger.info(
+        "LLM deep-read claims for '%s' (budget calls %s/%s)",
+        title,
+        (budget.calls + 1) if budget is not None else "?",
+        budget.max_calls if budget is not None and budget.max_calls > 0 else "∞",
+    )
+    usage = None
+    try:
+        raw, usage = complete_with_usage(
+            provider,
+            prompt,
+            system=DEEP_READ_SYSTEM_PROMPT,
+        )
+        parsed = _parse_deep_read_claims(raw)
+        if not parsed:
+            logger.warning("LLM deep-read for '%s' returned unusable JSON", title)
+            return None
+        return _format_claims_block(parsed)
+    except Exception as exc:  # noqa: BLE001 - fall back to extractive evidence
+        logger.warning("LLM deep-read failed for '%s': %s", title, exc)
+        return None
+    finally:
+        if budget is not None:
+            budget.record(prompt_chars, usage)
 
 
 def _note_identity(segment_indices: list[int], concept_title: str) -> tuple:
@@ -450,6 +593,10 @@ def _llm_draft_topic_body(
         max_chars=TEXT_LIMITS.note_draft_excerpt_chars,
         source=source,
     )
+    if _should_llm_deep_read(topic, budget=budget):
+        claims_block = _llm_deep_read_claims(source, topic, budget=budget)
+        if claims_block:
+            evidence = f"{evidence.rstrip()}\n\n{claims_block}"
     prompt = note_draft_prompt(
         source=source,
         concept_title=title,

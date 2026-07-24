@@ -335,3 +335,145 @@ def test_fallback_progressive_note_quality_spot_check():
     assert "# Momentum" in suggestion.content
     assert ">" in suggestion.content
     assert "**" in suggestion.content
+
+
+def test_should_llm_deep_read_gates(monkeypatch):
+    from app.atomic_notes import AtomicTopic
+    from app.llm_budget import LLMBudget
+    from app.sources.base import SourceLocation, SourceSegment
+    from app.suggest.draft import _should_llm_deep_read
+
+    topic = AtomicTopic(
+        title="Novel",
+        segments=[
+            SourceSegment(text="Novel concept body text.", location=SourceLocation(), index=0)
+        ],
+        is_novel=True,
+    )
+    known = AtomicTopic(
+        title="Known",
+        segments=[
+            SourceSegment(text="Known concept body text.", location=SourceLocation(), index=0)
+        ],
+        is_novel=False,
+    )
+
+    monkeypatch.setattr("app.suggest.draft.settings.draft_llm_deep_read", False)
+    monkeypatch.setattr("app.suggest.draft.settings.llm_draft_batch_size", 1)
+    assert not _should_llm_deep_read(topic, budget=None)
+
+    monkeypatch.setattr("app.suggest.draft.settings.draft_llm_deep_read", True)
+    assert _should_llm_deep_read(topic, budget=None)
+    assert not _should_llm_deep_read(known, budget=None)
+
+    monkeypatch.setattr("app.suggest.draft.settings.llm_draft_batch_size", 3)
+    assert not _should_llm_deep_read(topic, budget=None)
+
+    monkeypatch.setattr("app.suggest.draft.settings.llm_draft_batch_size", 1)
+    tight = LLMBudget(max_calls=2, max_input_chars=0)
+    tight.calls = 1  # only 1 remaining — not enough for claims + synthesize
+    assert not _should_llm_deep_read(topic, budget=tight)
+    roomy = LLMBudget(max_calls=5, max_input_chars=0)
+    assert _should_llm_deep_read(topic, budget=roomy)
+
+
+def test_parse_deep_read_claims_accepts_object():
+    from app.suggest.draft import _format_claims_block, _parse_deep_read_claims
+
+    parsed = _parse_deep_read_claims(
+        '```json\n{"claims": ["AdaGrad adapts per-parameter rates"], '
+        '"terms": ["AdaGrad"], "caveats": ["Can decay too fast"]}\n```'
+    )
+    assert parsed is not None
+    assert "AdaGrad" in parsed["terms"]
+    block = _format_claims_block(parsed)
+    assert "Claims:" in block
+    assert "Caveats:" in block
+
+
+def test_llm_draft_runs_deep_read_when_enabled(monkeypatch):
+    from app.atomic_notes import AtomicTopic
+    from app.llm_budget import LLMBudget
+    from app.sources.base import LoadedSource, SourceLocation, SourceSegment
+    from app.suggest.draft import _llm_draft_topic_body
+
+    monkeypatch.setattr("app.suggest.draft.settings.draft_llm_deep_read", True)
+    monkeypatch.setattr("app.suggest.draft.settings.llm_draft_batch_size", 1)
+
+    calls: list[str] = []
+
+    class Provider:
+        def complete(self, prompt, *, system=None, json_mode=False):
+            calls.append(system or "")
+            if system and "extract factual claims" in system.casefold():
+                return (
+                    '{"claims": ["Momentum accumulates velocity"], '
+                    '"terms": ["momentum"], "caveats": ["Can overshoot"]}'
+                )
+            assert "LLM deep-read extraction" in prompt
+            assert "Momentum accumulates velocity" in prompt
+            return "# Momentum\n\n> Momentum accumulates velocity.\n"
+
+    monkeypatch.setattr("app.suggest.draft.get_llm_provider", lambda: Provider())
+
+    topic = AtomicTopic(
+        title="Momentum",
+        segments=[
+            SourceSegment(
+                text=(
+                    "Momentum accumulates a velocity vector from past gradients. "
+                    "It dampens oscillations during steepest descent."
+                ),
+                location=SourceLocation(page=1),
+                index=0,
+            )
+        ],
+        summary="Momentum accumulates velocity from past gradients.",
+        is_novel=True,
+    )
+    source = LoadedSource(
+        title="Src",
+        text="body",
+        source_type="text",
+        source_ref="a.txt",
+    )
+    budget = LLMBudget(max_calls=10, max_input_chars=0)
+    body = _llm_draft_topic_body(source, topic, [], budget=budget)
+    assert body is not None
+    assert "Momentum" in body
+    assert budget.calls == 2  # claims + synthesize
+    assert any("extract factual claims" in item.casefold() for item in calls)
+
+
+def test_llm_draft_skips_deep_read_when_batch_size_gt_one(monkeypatch):
+    from app.atomic_notes import AtomicTopic
+    from app.sources.base import LoadedSource, SourceLocation, SourceSegment
+    from app.suggest.draft import _llm_draft_topic_body
+
+    monkeypatch.setattr("app.suggest.draft.settings.draft_llm_deep_read", True)
+    monkeypatch.setattr("app.suggest.draft.settings.llm_draft_batch_size", 3)
+
+    calls = {"n": 0}
+
+    class Provider:
+        def complete(self, prompt, *, system=None, json_mode=False):
+            calls["n"] += 1
+            assert system is None or "extract factual claims" not in (system or "").casefold()
+            return "# Topic\n\nBody.\n"
+
+    monkeypatch.setattr("app.suggest.draft.get_llm_provider", lambda: Provider())
+    topic = AtomicTopic(
+        title="Topic",
+        segments=[
+            SourceSegment(
+                text="Topic is a precise concept with enough explanatory detail.",
+                location=SourceLocation(page=1),
+                index=0,
+            )
+        ],
+        is_novel=True,
+    )
+    source = LoadedSource(title="Src", text="body", source_type="text", source_ref="a.txt")
+    body = _llm_draft_topic_body(source, topic, [], budget=None)
+    assert body is not None
+    assert calls["n"] == 1

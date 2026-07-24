@@ -34,6 +34,8 @@ class TextLimits:
     evidence_l1_max: int = 10
     evidence_l3_max_sentences: int = 3
     evidence_nucleus_max_words: int = 6
+    # Larger pack used only for optional LLM deep-read claims extraction.
+    deep_read_excerpt_chars: int = 4000
 
     # Fallback bullet text when extractive parsing finds no list items.
     fallback_bullet_chars: int = 220

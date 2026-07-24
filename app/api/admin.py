@@ -105,6 +105,7 @@ def get_status():
             "duplicate_detection_enabled": settings.duplicate_detection_enabled,
             "duplicate_similarity_threshold": settings.duplicate_similarity_threshold,
             "note_quality_scoring_enabled": settings.note_quality_scoring_enabled,
+            "draft_llm_deep_read": settings.draft_llm_deep_read,
             "auto_tagging_enabled": settings.auto_tagging_enabled,
             "prompt_domain": settings.prompt_domain or None,
         },
