@@ -316,14 +316,18 @@ def load_checkpoint_by_key(source_key: str) -> dict | None:
 
 
 def load_latest_checkpoint() -> dict | None:
-    """Most recently updated checkpoint (any source) — for Recover last saved notes."""
+    """Most recently updated checkpoint that still has saved notes.
+
+    Empty incomplete runs (analyze started, nothing drafted yet) are skipped so
+    Recover / Continue do not surface a blank checkpoint that hides older work.
+    """
     _ensure_migrated()
     entries = _load_manifest_unlocked()["entries"]
     if not entries:
         return None
     for entry in sorted(entries, key=lambda item: item.get("updated_at", ""), reverse=True):
-        data = _load_checkpoint_file(checkpoint_dir() / entry["file"])
-        if data:
+        data = _load_checkpoint_file(checkpoint_dir() / str(entry.get("file", "")))
+        if data and data.get("suggestions"):
             return data
     return None
 

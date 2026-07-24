@@ -1386,17 +1386,24 @@ sourceFileInput.addEventListener("change", syncSourceInputs);
 
 recoverBtn.addEventListener("click", async () => {
   analyzeError.classList.add("hidden");
-  clearAnalysisResults();
+  applyMessage.textContent = "";
   recoverBtn.disabled = true;
 
   try {
     const data = await fetchJson("/api/suggestions/checkpoint");
     const saved = (data && data.suggestions) || [];
-    if (!data.exists || !saved.length) {
-      applyMessage.textContent = "No saved notes to recover yet.";
-      applyMessage.className = "text-sm text-slate-500";
+    if (!data || !data.exists || !saved.length) {
+      // Keep results hidden; applyMessage lives inside resultsSection so use
+      // the always-visible analyze error/status area instead.
+      analyzeError.textContent = "No saved notes to recover yet.";
+      analyzeError.classList.remove("hidden");
+      analyzeError.className = "text-sm text-slate-600";
       return;
     }
+
+    clearAnalysisResults();
+    analyzeError.classList.add("hidden");
+    analyzeError.className = "text-red-600 text-sm hidden";
 
     resultsSection.classList.remove("hidden");
     verdictBadge.textContent = "Recovered";
@@ -1423,6 +1430,7 @@ recoverBtn.addEventListener("click", async () => {
   } catch (error) {
     analyzeError.textContent = error.message;
     analyzeError.classList.remove("hidden");
+    analyzeError.className = "text-red-600 text-sm";
   } finally {
     recoverBtn.disabled = false;
   }

@@ -108,6 +108,38 @@ def test_per_source_checkpoints_do_not_overwrite_each_other(tmp_data_dir):
     assert load_latest_checkpoint() is not None
 
 
+def test_load_latest_checkpoint_skips_empty_incomplete(tmp_data_dir):
+    """A newer empty run must not hide an older checkpoint that still has notes."""
+    older = SuggestionCheckpoint.for_source("text", "older.md")
+    older.start(
+        {
+            "title": "Older",
+            "source_type": "text",
+            "source_ref": "older.md",
+            "source_key": "text:older.md",
+        }
+    )
+    older.add({"note_path": "older.md", "content": "kept notes"})
+    older.finish(completed=True)
+
+    newer_empty = SuggestionCheckpoint.for_source("text", "newer.md")
+    newer_empty.start(
+        {
+            "title": "Newer empty",
+            "source_type": "text",
+            "source_ref": "newer.md",
+            "source_key": "text:newer.md",
+        }
+    )
+    newer_empty.finish(completed=False)
+
+    latest = load_latest_checkpoint()
+    assert latest is not None
+    assert latest["source"]["source_ref"] == "older.md"
+    assert len(latest["suggestions"]) == 1
+    assert latest["suggestions"][0]["content"] == "kept notes"
+
+
 def test_checkpoint_bundle_round_trip(tmp_data_dir):
     checkpoint = SuggestionCheckpoint.for_source("text", "portable.md")
     checkpoint.start(
