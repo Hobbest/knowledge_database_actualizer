@@ -111,51 +111,62 @@ class ChromaVectorStore:
         self._bind_collection(self._vault_path)
 
     def index_vault(self, vault_path: Path) -> dict[str, Any]:
-        """Embed and index the vault, skipping unchanged notes when fingerprints match."""
+        """Embed and index the vault, skipping unchanged notes when fingerprints match.
+
+        Embeddings run outside ``INDEX_LOCK``; the lock only covers delete/add.
+        """
         plan = plan_vault_index(vault_path)
         if plan.full_rebuild:
             with INDEX_LOCK:
                 self._reset_unlocked()
 
-        batch_size = max(1, settings.chroma_index_batch_size)
-        indexed_note_count = 0
-        chunk_delta = 0
-
         with INDEX_LOCK:
             for rel in plan.removed_paths:
                 self._delete_note_chunks(rel)
 
-            ids: list[str] = []
-            documents: list[str] = []
-            metadatas: list[dict[str, Any]] = []
-            embeddings: list[list[float]] = []
+        batch_size = max(1, settings.chroma_index_batch_size)
+        indexed_note_count = 0
+        chunk_delta = 0
+        ids: list[str] = []
+        documents: list[str] = []
+        metadatas: list[dict[str, Any]] = []
+        embeddings: list[list[float]] = []
 
-            def flush() -> None:
-                nonlocal chunk_delta
-                if not ids:
-                    return
+        def flush() -> None:
+            nonlocal chunk_delta
+            if not ids:
+                return
+            with INDEX_LOCK:
                 self._collection.add(
                     ids=ids,
                     documents=documents,
                     metadatas=metadatas,
                     embeddings=embeddings,
                 )
-                chunk_delta += len(ids)
-                ids.clear()
-                documents.clear()
-                metadatas.clear()
-                embeddings.clear()
+            chunk_delta += len(ids)
+            ids.clear()
+            documents.clear()
+            metadatas.clear()
+            embeddings.clear()
 
-            for note, note_chunks in iter_vault_index_chunks(plan):
-                rel = note.path.as_posix()
+        for note, note_chunks in iter_vault_index_chunks(plan):
+            rel = note.path.as_posix()
+            # Embed outside the lock (can take seconds for large notes).
+            prepared = self._materialize_chunks(note_chunks)
+            with INDEX_LOCK:
                 self._delete_note_chunks(rel)
-                before = len(ids)
-                self._append_prepared_chunks(note_chunks, ids, documents, metadatas, embeddings)
-                if len(ids) > before:
-                    indexed_note_count += 1
-                if len(ids) >= batch_size:
-                    flush()
-            flush()
+            if prepared is None:
+                continue
+            note_ids, note_docs, note_metas, note_vectors = prepared
+            indexed_note_count += 1
+            ids.extend(note_ids)
+            documents.extend(note_docs)
+            metadatas.extend(note_metas)
+            embeddings.extend(note_vectors)
+            if len(ids) >= batch_size:
+                flush()
+        flush()
+        with INDEX_LOCK:
             total_chunks = self._collection.count()
 
         new_fingerprints = fingerprints_for_vault(plan.vault_path, list(plan.current_notes.values()))
@@ -207,18 +218,19 @@ class ChromaVectorStore:
                 )
             )
 
+        # Embed outside INDEX_LOCK so long encode calls do not block queries.
+        materialized: list[tuple[str, tuple[list[str], list[str], list[dict[str, Any]], list[list[float]]] | None]] = []
+        for rel, note_chunks in prepared:
+            materialized.append((rel, self._materialize_chunks(note_chunks)))
+
         indexed = 0
         chunk_count = 0
         with INDEX_LOCK:
-            for rel, note_chunks in prepared:
+            for rel, payload in materialized:
                 self._delete_note_chunks(rel)
-                if not note_chunks:
+                if payload is None:
                     continue
-                ids: list[str] = []
-                documents: list[str] = []
-                metadatas: list[dict[str, Any]] = []
-                embeddings: list[list[float]] = []
-                self._append_prepared_chunks(note_chunks, ids, documents, metadatas, embeddings)
+                ids, documents, metadatas, embeddings = payload
                 self._collection.add(
                     ids=ids,
                     documents=documents,
@@ -263,6 +275,25 @@ class ChromaVectorStore:
         if ids:
             self._collection.delete(ids=ids)
 
+    def _materialize_chunks(
+        self, note_chunks: list[IndexedChunk]
+    ) -> tuple[list[str], list[str], list[dict[str, Any]], list[list[float]]] | None:
+        """Embed chunks (caller should be outside INDEX_LOCK)."""
+        if not note_chunks:
+            return None
+        texts = [chunk.text for chunk in note_chunks]
+        vectors = self.embedding_service.embed_texts(texts)
+        ids: list[str] = []
+        documents: list[str] = []
+        metadatas: list[dict[str, Any]] = []
+        embeddings: list[list[float]] = []
+        for chunk, vector in zip(note_chunks, vectors, strict=True):
+            ids.append(chunk.chunk_id)
+            documents.append(chunk.text)
+            metadatas.append(chunk.chroma_metadata())
+            embeddings.append(vector)
+        return ids, documents, metadatas, embeddings
+
     def _append_prepared_chunks(
         self,
         note_chunks: list[IndexedChunk],
@@ -271,15 +302,14 @@ class ChromaVectorStore:
         metadatas: list[dict[str, Any]],
         embeddings: list[list[float]],
     ) -> None:
-        if not note_chunks:
+        prepared = self._materialize_chunks(note_chunks)
+        if prepared is None:
             return
-        texts = [chunk.text for chunk in note_chunks]
-        vectors = self.embedding_service.embed_texts(texts)
-        for chunk, vector in zip(note_chunks, vectors, strict=True):
-            ids.append(chunk.chunk_id)
-            documents.append(chunk.text)
-            metadatas.append(chunk.chroma_metadata())
-            embeddings.append(vector)
+        note_ids, note_docs, note_metas, note_vectors = prepared
+        ids.extend(note_ids)
+        documents.extend(note_docs)
+        metadatas.extend(note_metas)
+        embeddings.extend(note_vectors)
 
     def query_similar(
         self,

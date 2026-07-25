@@ -169,6 +169,9 @@ def plan_atomic_topics(
             # No reliable similarity — do not claim novelty.
             topic.is_novel = False
 
+    if settings.draft_novel_first:
+        # Prefer novel topics when the hard per-source cap would drop work.
+        topics = sorted(topics, key=lambda topic: (0 if topic.is_novel else 1))
     capped = topics[: settings.max_notes_per_source]
     return _dedupe_topics(capped)
 

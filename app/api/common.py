@@ -489,6 +489,8 @@ def _put_unless_cancelled(queue: Queue, item, cancelled: threading.Event) -> boo
 
 
 def _ndjson_worker(queue: Queue, iterator_factory, cancelled: threading.Event) -> None:
+    from app.runtime import release_analyze_slot
+
     events = iterator_factory()
     try:
         for payload in events:
@@ -508,6 +510,7 @@ def _ndjson_worker(queue: Queue, iterator_factory, cancelled: threading.Event) -
             cancelled,
         )
     finally:
+        release_analyze_slot()
         events.close()
         # Wake a consumer that may still be blocked on queue.get(). If the
         # queue is full the consumer is not blocked, so dropping DONE is safe.

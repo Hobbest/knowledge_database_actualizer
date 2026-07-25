@@ -1101,6 +1101,28 @@ def iter_note_suggestions(
             segment_scores=segment_scores,
         )
 
+    if topics:
+        novel_count = sum(1 for topic in topics if topic.is_novel)
+        batch_size_hint = max(1, settings.llm_draft_batch_size)
+        pending_count = len(topics)
+        est_rounds = (pending_count + batch_size_hint - 1) // batch_size_hint
+        remaining = budget.remaining_calls
+        capped_rounds = est_rounds if remaining <= 0 else min(est_rounds, remaining)
+        cost_hint = estimate_run_cost_hint(
+            note_count=len(topics),
+            planning=budget.calls > 0,
+        )
+        yield {
+            "type": "preflight",
+            "note_count": pending_count,
+            "novel_count": novel_count,
+            "known_count": pending_count - novel_count,
+            "estimated_llm_rounds": capped_rounds if settings.llm_enabled else 0,
+            "draft_novel_first": bool(settings.draft_novel_first),
+            "max_notes_per_source": settings.max_notes_per_source,
+            "message": cost_hint,
+        }
+
     if settings.llm_enabled and topics:
         batch_size_hint = max(1, settings.llm_draft_batch_size)
         pending_count = len(topics)

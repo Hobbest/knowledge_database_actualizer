@@ -2092,9 +2092,12 @@ class KnowledgeDatabaseActualizerPlugin extends Plugin {
           if (controller.signal.aborted) {
             return;
           }
-          if (view && event.type === "progress") {
-            view.setProgress(event.message || "Working...", event);
-            if (event.stage === "drafting") {
+          if (view && (event.type === "progress" || event.type === "preflight")) {
+            view.setProgress(event.message || "Working...", {
+              ...event,
+              stage: event.stage || "drafting",
+            });
+            if (event.type === "preflight" || event.stage === "drafting") {
               this.pollCheckpointOnce(view);
             }
           }

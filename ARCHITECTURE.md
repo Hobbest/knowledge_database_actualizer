@@ -370,16 +370,23 @@ sequenceDiagram
 
 The HTTP response is **NDJSON**. Analyze work runs in a **worker thread** on
 `ANALYZE_POOL` (long drafting runs do not starve index/apply on `WORKER_POOL`).
-If the client disconnects mid-run, the consumer sets a cancellation event and
-the worker stops — notes drafted so far stay in the checkpoint. Uploads larger
-than `MAX_UPLOAD_MB` are rejected with `413` before any work starts. Index
-mutations and queries take `INDEX_LOCK`.
+Concurrent analyze streams are capped by `ANALYZE_MAX_IN_FLIGHT` (default 2);
+excess requests get **HTTP 429**. If the client disconnects mid-run, the consumer
+sets a cancellation event and the worker stops — notes drafted so far stay in
+the checkpoint. Uploads larger than `MAX_UPLOAD_MB` are rejected with `413`
+before any work starts. Index mutations and vector queries take `INDEX_LOCK`;
+embedding encode calls run **outside** the lock (same pattern as
+`query_similar_many`).
+
+**Process model:** single-process, single-user local runtime. Shared locks/pools
+and module-level stores are intentional — not a multi-tenant server.
 
 ### Streamed event types
 
 | `type` | Fields | Meaning |
 |--------|--------|---------|
 | `progress` | `stage`, `current`, `total`, `message` | loading · novelty · scoring · drafting |
+| `preflight` | `note_count`, `novel_count`, `known_count`, `estimated_llm_rounds`, `message` | After planning: cost/admission hint before drafting |
 | `warning` | `message` | Non-fatal (budget, rate-limit, replace checkpoint, …) |
 | `result` | `source`, `novelty`, `suggestions`, `warnings`, `graph` | Final payload (+ wikilinks, tags, obsidian URIs on overlaps) |
 | `error` | `message`, `partial_suggestions` | Fatal; notes already checkpointed remain |
@@ -705,17 +712,20 @@ Pinned runtime deps live in `requirements.txt` / `pyproject.toml`;
 - **New embedding/LLM/vector provider:** `EmbeddingBackend` / `LLMProvider` /
   `VectorStoreProtocol` + factories, or entry points `actualizer.embedding_backends`,
   `actualizer.llm_providers`, `actualizer.vector_stores`.
+- **Plugins are trusted code:** entry-point plugins run in-process with the same
+  privileges as the app. Prefer `DISABLE_PLUGIN_DISCOVERY=true` or a tight
+  `PLUGIN_ALLOWLIST` on networked/Docker profiles.
 - **Prompt domain packs:** bundled JSON under `prompts/domains/`, user packs under
   `DATA_DIR/domains/`, or entry point `actualizer.prompt_domains`.
 - **Evidence packing / progressive draft layers:** `app/progressive.py`
   (`EvidencePack`, `EVIDENCE_PACK_VERSION`) — tune scoring, layer sizes
   (`TEXT_LIMITS.evidence_*`), or packing priority without growing `suggest/draft.py`.
   Draft-only: do **not** bump `analysis_fingerprint` when changing pack contents.
-- **Optional LLM deep-read (future):** a gated `DRAFT_LLM_DEEP_READ` claims pass
-  for novel topics could sit between packing and synthesize; default remains off
-  and must skip when batching or budget is low. Not shipped.
+- **Optional LLM deep-read:** gated `DRAFT_LLM_DEEP_READ` claims pass for novel
+  topics (skipped when batching or budget is low).
 - **Tuning volume/cost:** `SEGMENT_TARGET_CHARS`, `MAX_NOTES_PER_SOURCE`,
-  atomic limits, and LLM budget caps.
+  `DRAFT_NOVEL_FIRST`, `ANALYZE_MAX_IN_FLIGHT`, atomic limits, and LLM budget caps.
+- **Append confirmation:** `APPEND_OVERLAP_MARGIN`, `APPEND_REQUIRE_TAG_OVERLAP`.
 - **Similarity tuning:** tag boost knobs, threshold calibration sample size, or
   provider defaults in `thresholds.py`.
 - **Prompt changes:** `app/prompts.py` / domain packs.
@@ -724,8 +734,9 @@ Pinned runtime deps live in `requirements.txt` / `pyproject.toml`;
 
 ## 18. Request lifecycle summary
 
-1. **Index** vault (worker + lock) → incremental batched embeddings in Chroma +
-   resolved wikilink graph + `index_meta` fingerprints.
+1. **Index** vault (worker + lock for mutations; embeddings outside lock) →
+   incremental batched Chroma/Qdrant upsert + resolved wikilink graph +
+   `index_meta` fingerprints.
 2. **Analyze** source → load & identity key → tag-aware novelty (batched queries)
    → plan topics → draft under budget/retry → stream NDJSON → checkpoint each
    note → optional MOC.

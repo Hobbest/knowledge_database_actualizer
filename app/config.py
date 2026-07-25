@@ -85,8 +85,19 @@ class Settings(BaseSettings):
 
     max_note_lines: int = 80
     max_notes_per_source: int = 1000
+    # When True, prefer novel topics when applying MAX_NOTES_PER_SOURCE.
+    draft_novel_first: bool = True
     atomic_note_line_limit: int = 40
     atomic_note_char_limit: int = 1800
+
+    # Concurrent analyze streams before HTTP 429 (0 = unlimited).
+    analyze_max_in_flight: int = 2
+
+    # Append-target confirmation: top match must beat runner-up by this margin
+    # on raw content similarity (0 = disabled).
+    append_overlap_margin: float = 0.05
+    # When both source and vault match have tags, require at least one shared tag.
+    append_require_tag_overlap: bool = True
 
     # Planning segmentation: large source units (e.g. full PDF pages) are split
     # into planning units of about this many characters before note planning, so
@@ -314,6 +325,10 @@ class Settings(BaseSettings):
             raise ValueError("PDF_OCR_DPI must be >= 72")
         if self.moc_min_notes < 2:
             raise ValueError("MOC_MIN_NOTES must be >= 2")
+        if self.analyze_max_in_flight < 0:
+            raise ValueError("ANALYZE_MAX_IN_FLIGHT must be >= 0 (0 = unlimited)")
+        if not (0.0 <= self.append_overlap_margin <= 1.0):
+            raise ValueError("APPEND_OVERLAP_MARGIN must be between 0 and 1")
         if self.tag_similarity_boost_per_tag < 0:
             raise ValueError("TAG_SIMILARITY_BOOST_PER_TAG must be >= 0")
         if self.tag_similarity_max_boost < 0:

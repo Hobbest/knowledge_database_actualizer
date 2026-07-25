@@ -207,19 +207,38 @@ def topic_overlap_match(
     *,
     query_tags: list[str] | None = None,
 ) -> tuple[str, float, str | None] | None:
-    """Best vault note match for a topic when similarity meets KNOWN_THRESHOLD."""
+    """Best vault note match for a topic when append evidence is strong enough.
+
+    Uses raw content similarity (not tag-boosted ranking) against
+    ``KNOWN_THRESHOLD``, requires a margin over the runner-up note when
+    ``APPEND_OVERLAP_MARGIN > 0``, and optionally requires shared tags when
+    both sides have tags.
+    """
     if vector_store is None or vector_store.chunk_count() == 0:
         return None
     text = combine_segment_text(topic.segments).strip()
     if not text:
         return None
-    matches = vector_store.query_similar(text, top_k=1, query_tags=query_tags)
+    matches = vector_store.query_similar(text, top_k=2, query_tags=query_tags)
     if not matches:
         return None
     best = matches[0]
-    if best.similarity < settings.known_threshold:
+    # Gate on content similarity so tag boost alone cannot create an append target.
+    if best.content_similarity < settings.known_threshold:
         return None
-    return best.note_path, best.similarity, best.heading
+    margin = float(getattr(settings, "append_overlap_margin", 0.0) or 0.0)
+    if margin > 0 and len(matches) > 1:
+        runner_up = matches[1]
+        if runner_up.note_path != best.note_path:
+            if best.content_similarity - runner_up.content_similarity < margin:
+                return None
+    if getattr(settings, "append_require_tag_overlap", False) and query_tags:
+        match_tags = list(getattr(best, "tags", None) or [])
+        query = {tag.casefold() for tag in query_tags if tag}
+        match = {tag.casefold() for tag in match_tags if tag}
+        if query and match and not (query & match):
+            return None
+    return best.note_path, round(best.content_similarity, 3), best.heading
 
 
 def content_for_append(full_content: str, *, heading: str = "Update") -> str:

@@ -1307,6 +1307,15 @@ async function runAnalysis({ resume = false } = {}) {
       (event) => {
         if (event.type === "progress") {
           showProgress(event);
+        } else if (event.type === "preflight") {
+          showProgress({
+            stage: "drafting",
+            current: 0,
+            total: event.note_count || 0,
+            message:
+              event.message ||
+              `Planning complete: ${event.novel_count ?? "?"} novel / ${event.note_count ?? "?"} notes`,
+          });
         } else if (event.type === "warning") {
           liveWarnings.push(event.message);
           renderWarnings(liveWarnings);

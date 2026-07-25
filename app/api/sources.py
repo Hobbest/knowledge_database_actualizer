@@ -14,7 +14,7 @@ from app.api.common import (
     _resolve_vault_path,
 )
 from app.config import settings
-from app.runtime import ANALYZE_POOL
+from app.runtime import ANALYZE_POOL, try_acquire_analyze_slot
 
 router = APIRouter()
 
@@ -37,6 +37,17 @@ async def analyze_source(
     file_name = (file.filename or "upload.txt") if file else None
     clean_url = url.strip() if url else None
 
+    if not try_acquire_analyze_slot(settings.analyze_max_in_flight):
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Too many analyze runs in flight "
+                f"(limit {settings.analyze_max_in_flight}). "
+                "Retry after an active analysis finishes."
+            ),
+            headers={"Retry-After": "30"},
+        )
+
     queue: Queue = Queue(maxsize=32)
     cancelled = threading.Event()
 
@@ -50,7 +61,13 @@ async def analyze_source(
             vault_path=active_vault,
         )
 
-    ANALYZE_POOL.submit(_ndjson_worker, queue, iterator_factory, cancelled)
+    try:
+        ANALYZE_POOL.submit(_ndjson_worker, queue, iterator_factory, cancelled)
+    except Exception:
+        from app.runtime import release_analyze_slot
+
+        release_analyze_slot()
+        raise
     return StreamingResponse(
         _queue_to_async_stream(queue, cancelled),
         media_type="application/x-ndjson",

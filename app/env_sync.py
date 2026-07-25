@@ -119,12 +119,27 @@ ENV_SECTIONS: tuple[EnvSection, ...] = (
         fields=("chunk_size", "chunk_overlap"),
     ),
     EnvSection(
-        header=("# Atomic note generation",),
+        header=(
+            "# Atomic note generation.",
+            "# DRAFT_NOVEL_FIRST prefers novel topics when capping with MAX_NOTES_PER_SOURCE.",
+        ),
         fields=(
             "max_note_lines",
             "max_notes_per_source",
+            "draft_novel_first",
             "atomic_note_line_limit",
             "atomic_note_char_limit",
+        ),
+    ),
+    EnvSection(
+        header=(
+            "# Concurrent analyze streams before HTTP 429 (0 = unlimited).",
+            "# Append confirmation: margin vs runner-up + optional shared-tag check.",
+        ),
+        fields=(
+            "analyze_max_in_flight",
+            "append_overlap_margin",
+            "append_require_tag_overlap",
         ),
     ),
     EnvSection(

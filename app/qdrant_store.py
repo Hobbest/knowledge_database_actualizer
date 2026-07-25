@@ -122,7 +122,10 @@ class QdrantVectorStore:
             pass
 
     def index_vault(self, vault_path: Path) -> dict[str, Any]:
-        """Embed and index the vault using shared fingerprint-aware orchestration."""
+        """Embed and index the vault using shared fingerprint-aware orchestration.
+
+        Embeddings run outside ``INDEX_LOCK``; the lock only covers delete/upsert.
+        """
         plan = plan_vault_index(vault_path)
         if plan.full_rebuild:
             with INDEX_LOCK:
@@ -132,29 +135,45 @@ class QdrantVectorStore:
                     pass
                 self._ensure_collection()
 
-        batch_size = max(1, settings.chroma_index_batch_size)
-        indexed_note_count = 0
-        chunk_delta = 0
-        pending: list[IndexedChunk] = []
-
         with INDEX_LOCK:
             for rel in plan.removed_paths:
                 self._delete_note_chunks(rel)
 
-            for note, note_chunks in iter_vault_index_chunks(plan):
-                rel = note.path.as_posix()
+        batch_size = max(1, settings.chroma_index_batch_size)
+        indexed_note_count = 0
+        chunk_delta = 0
+        pending_chunks: list[IndexedChunk] = []
+        pending_vectors: list[list[float]] = []
+
+        def flush() -> None:
+            nonlocal chunk_delta
+            if not pending_chunks:
+                return
+            with INDEX_LOCK:
+                chunk_delta += self.upsert_chunks(pending_chunks, embeddings=pending_vectors)
+            pending_chunks.clear()
+            pending_vectors.clear()
+
+        for note, note_chunks in iter_vault_index_chunks(plan):
+            rel = note.path.as_posix()
+            with INDEX_LOCK:
                 self._delete_note_chunks(rel)
-                if note_chunks:
-                    indexed_note_count += 1
-                pending.extend(note_chunks)
-                while len(pending) >= batch_size:
-                    batch = pending[:batch_size]
-                    del pending[:batch_size]
-                    chunk_delta += self.upsert_chunks(batch)
-
-            if pending:
-                chunk_delta += self.upsert_chunks(pending)
-
+            if not note_chunks:
+                continue
+            indexed_note_count += 1
+            texts = [chunk.text for chunk in note_chunks]
+            vectors = self.embedding_service.embed_texts(texts)
+            pending_chunks.extend(note_chunks)
+            pending_vectors.extend(list(vector) for vector in vectors)
+            while len(pending_chunks) >= batch_size:
+                batch = pending_chunks[:batch_size]
+                batch_vectors = pending_vectors[:batch_size]
+                del pending_chunks[:batch_size]
+                del pending_vectors[:batch_size]
+                with INDEX_LOCK:
+                    chunk_delta += self.upsert_chunks(batch, embeddings=batch_vectors)
+        flush()
+        with INDEX_LOCK:
             total_chunks = self.chunk_count()
 
         new_fingerprints = fingerprints_for_vault(plan.vault_path, list(plan.current_notes.values()))
@@ -204,14 +223,23 @@ class QdrantVectorStore:
                 )
             )
 
+        materialized: list[tuple[str, list[IndexedChunk], list[list[float]] | None]] = []
+        for rel, note_chunks in prepared:
+            if not note_chunks:
+                materialized.append((rel, [], None))
+                continue
+            texts = [chunk.text for chunk in note_chunks]
+            vectors = [list(v) for v in self.embedding_service.embed_texts(texts)]
+            materialized.append((rel, list(note_chunks), vectors))
+
         indexed = 0
         chunk_count = 0
         with INDEX_LOCK:
-            for rel, note_chunks in prepared:
+            for rel, note_chunks, vectors in materialized:
                 self._delete_note_chunks(rel)
-                if not note_chunks:
+                if not note_chunks or vectors is None:
                     continue
-                chunk_count += self.upsert_chunks(note_chunks)
+                chunk_count += self.upsert_chunks(note_chunks, embeddings=vectors)
                 indexed += 1
             total_chunks = self.chunk_count()
 
