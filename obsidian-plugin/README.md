@@ -12,7 +12,7 @@ Thin client for the Knowledge Database Actualizer API. Keeps the Python server a
 3. Enable **Knowledge Database Actualizer** under Community plugins.
 4. Open **Settings → Knowledge Database Actualizer** and set:
    - **API base URL** — default `http://127.0.0.1:8000`
-   - **API token** — only if `API_TOKEN` is set in the server's `.env`
+   - **API token** — only if `API_TOKEN` is set in the server's `.env` (needs `read,analyze,write` when `API_TOKEN_CAPABILITIES` is restricted)
    - **Open notes after write** — open newly written notes in the editor (default on)
 
 ## Commands

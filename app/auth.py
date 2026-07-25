@@ -7,6 +7,36 @@ from collections.abc import Iterable
 
 ALL_CAPABILITIES = frozenset({"read", "analyze", "write", "admin", "chat"})
 
+# Exhaustive method+path map for /api/*. Unmapped API routes fail closed to admin.
+_ROUTE_CAPABILITIES: dict[tuple[str, str], frozenset[str]] = {
+    # read — status, search, graph, checkpoints, calibration preview
+    ("GET", "/api/status"): frozenset({"read"}),
+    ("GET", "/api/analytics"): frozenset({"read"}),
+    ("GET", "/api/vault/note"): frozenset({"read"}),
+    ("GET", "/api/vault/search"): frozenset({"read"}),
+    ("GET", "/api/vault/graph"): frozenset({"read"}),
+    ("GET", "/api/vault/thresholds/calibrate"): frozenset({"read"}),
+    ("GET", "/api/suggestions/checkpoint"): frozenset({"read"}),
+    ("POST", "/api/reports/export"): frozenset({"read"}),
+    # analyze
+    ("POST", "/api/sources/analyze"): frozenset({"analyze"}),
+    # write — vault mutators + note apply/preview
+    ("POST", "/api/vault/index"): frozenset({"write"}),
+    ("POST", "/api/vault/watch"): frozenset({"write"}),
+    ("POST", "/api/vault/refresh-notes"): frozenset({"write"}),
+    ("POST", "/api/suggestions/apply"): frozenset({"write"}),
+    ("POST", "/api/suggestions/apply-batch"): frozenset({"write"}),
+    ("POST", "/api/suggestions/preview"): frozenset({"write"}),
+    # chat
+    ("POST", "/api/chat"): frozenset({"chat"}),
+    # admin — privileged config, logs, server-side exports/imports
+    ("GET", "/api/debug/recent-logs"): frozenset({"admin"}),
+    ("POST", "/api/vault/thresholds"): frozenset({"admin"}),
+    ("GET", "/api/vault/index/export"): frozenset({"admin"}),
+    ("GET", "/api/suggestions/checkpoint/export"): frozenset({"admin"}),
+    ("POST", "/api/suggestions/checkpoint/import"): frozenset({"admin"}),
+}
+
 
 def parse_api_token_capabilities(raw: str) -> frozenset[str]:
     """Parse comma-separated capability names. Empty string grants all."""
@@ -27,23 +57,15 @@ def parse_api_token_capabilities(raw: str) -> frozenset[str]:
 
 
 def required_capabilities(method: str, path: str) -> frozenset[str]:
-    """Return capabilities required for an HTTP request."""
+    """Return capabilities required for an HTTP request.
+
+    Mapped routes use the explicit table. Unmapped ``/api/*`` paths require
+    ``admin`` (fail closed) so new endpoints are not silently readable.
+    """
     method = method.upper()
-    if path == "/api/chat" and method == "POST":
-        return frozenset({"chat"})
-    if path == "/api/sources/analyze" and method == "POST":
-        return frozenset({"analyze"})
-    if path in {"/api/suggestions/apply", "/api/suggestions/apply-batch", "/api/suggestions/preview"}:
-        return frozenset({"write"})
-    if path == "/api/suggestions/checkpoint/import" and method == "POST":
-        return frozenset({"admin"})
-    if path == "/api/vault/thresholds" and method == "POST":
-        return frozenset({"admin"})
-    if path == "/api/debug/recent-logs" and method == "GET":
-        return frozenset({"admin"})
-    if path.startswith("/api/"):
-        return frozenset({"read"})
-    return frozenset()
+    if not path.startswith("/api/"):
+        return frozenset()
+    return _ROUTE_CAPABILITIES.get((method, path), frozenset({"admin"}))
 
 
 def token_grants_capabilities(

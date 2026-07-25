@@ -24,6 +24,27 @@ from app.vault_watcher import vault_watch
 
 router = APIRouter()
 
+_LOCAL_LLM_PROVIDERS = frozenset({"ollama", "local"})
+_LOCAL_EMBEDDING_PROVIDERS = frozenset({"local"})
+
+
+def cloud_provider_privacy_warnings() -> list[str]:
+    """Warn when analysis/index text may leave the machine via cloud APIs."""
+    warnings: list[str] = []
+    llm_provider = (settings.llm_provider or "").strip().lower()
+    if settings.llm_enabled and llm_provider not in _LOCAL_LLM_PROVIDERS:
+        warnings.append(
+            f"LLM provider '{llm_provider}' may send source text to a cloud API. "
+            "Prefer ollama/local for private vaults."
+        )
+    embedding_provider = (settings.embedding_provider or "local").strip().lower()
+    if embedding_provider not in _LOCAL_EMBEDDING_PROVIDERS:
+        warnings.append(
+            f"Embedding provider '{embedding_provider}' may send vault/source text "
+            "to a cloud API. Prefer EMBEDDING_PROVIDER=local for private vaults."
+        )
+    return warnings
+
 
 @router.get("/api/status")
 def get_status():
@@ -45,6 +66,7 @@ def get_status():
         vault_path=resolved_vault,
     )
     warnings.extend(threshold_mismatch_warnings())
+    warnings.extend(cloud_provider_privacy_warnings())
     return {
         "vault_path": vault_path,
         "indexed_chunks": indexed_chunks,

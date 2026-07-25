@@ -193,7 +193,8 @@ def test_preview_rejects_path_traversal(client: TestClient, tmp_path: Path):
             "mode": "write",
         },
     )
-    assert response.status_code == 400
+    # Rejected by ApplySuggestionRequest path validator (HTTP 422).
+    assert response.status_code == 422
 
 
 def test_preview_reflects_write_that_apply_would_skip(client: TestClient, tmp_path: Path):

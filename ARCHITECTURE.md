@@ -540,16 +540,25 @@ flowchart TD
 
 The SPA is served **same-origin** from this app — there is **no CORS middleware**.
 Browsers therefore refuse cross-origin reads and preflighted API calls from other
-websites.
+websites. That is **not** a complete CSRF defense for cookie-less token-less
+loopback POSTs: a hostile page can still trigger form POSTs to `127.0.0.1` in
+some browsers.
 
 **Host allowlist (`ALLOWED_HOSTS`):** every request's `Host` header must match
 the comma-separated allowlist (default `localhost,127.0.0.1,[::1]`). Requests
 with a foreign host get `400` (DNS-rebinding guard).
 
+**Origin / Sec-Fetch-Site guard (no `API_TOKEN`):** mutating `/api/*` methods
+reject `Sec-Fetch-Site: cross-site` and mismatched `Origin` headers. Requests
+without those headers (curl, Obsidian) still work. When `API_TOKEN` is set, this
+guard is skipped — use the token instead. Localhost does **not** require a token
+by default.
+
 **API token (`API_TOKEN`):** when set:
 
 - `/api/*` requires `Authorization: Bearer <token>` **or** `X-API-Token: <token>`
 - comparison uses constant-time `secrets.compare_digest`
+- optional `API_TOKEN_CAPABILITIES` scopes the token (empty = all capabilities)
 - `/` and `/static/*` stay public (SPA shell)
 - `/api/status` reports `auth_required: true`
 - the SPA and Obsidian plugin prompt on `401` and store the token for the session
@@ -560,37 +569,46 @@ Unset `API_TOKEN` → open local use on loopback only. **`BIND_HOST` non-loopbac
 **Vault path allowlist:** request `vault_path` must equal configured `VAULT_PATH`
 when set, or resolve under `ALLOWED_VAULT_ROOTS` when that list is non-empty.
 `GET /api/vault/note` is limited to `.md` files. Outbound HTML fetches are capped
-by `MAX_FETCH_MB` (default 10). LLM prompts fence untrusted source text between
-`<<<UNTRUSTED_SOURCE>>>` markers.
+by `MAX_FETCH_MB` (default 10). PDF/EPUB/DOCX extraction soft-caps
+(`MAX_PDF_PAGES`, `MAX_SOURCE_CHARS`, `MAX_EPUB_ZIP_MEMBERS`,
+`MAX_EPUB_MEMBER_BYTES`) truncate with `load_warnings` rather than failing hard
+(except oversized EPUB ZIP member counts). LLM prompts fence untrusted source
+text between `<<<UNTRUSTED_SOURCE>>>` markers. Cloud LLM/embedding providers add
+a privacy warning on `GET /api/status`.
 
 ---
 
 ## 12. HTTP API surface
 
-| Method & path | Purpose |
-|---------------|---------|
-| `GET /api/status` | Config, index/graph sizes, LLM/embedding info, budgets, `stale_note_count`, `warnings`, `auth_required`, capabilities, plugin health, Obsidian URI flags, `thresholds.calibration_available` |
-| `GET /api/debug/recent-logs` | Recent structured log lines (admin capability) |
-| `POST /api/vault/index` | Incremental re-index + graph + `index_meta` (`if_stale` skips when fresh) |
-| `POST /api/vault/watch` | Enable/disable debounced index-on-save |
-| `GET /api/vault/note` | Read existing note content (append diff preview) |
-| `GET /api/vault/search` | Keyword / semantic vault search over indexed chunks |
-| `GET /api/vault/index/export` | Export index metadata / fingerprints |
-| `GET /api/vault/thresholds/calibrate` | Suggest novelty thresholds from indexed chunk samples |
-| `POST /api/vault/thresholds` | Persist calibrated novelty thresholds to `.env` (admin) |
-| `GET /api/vault/graph` | Vis-network JSON (optional highlight) |
-| `POST /api/vault/refresh-notes` | Re-embed notes already written on disk |
-| `POST /api/sources/analyze` | NDJSON: novelty + suggestions (`resume`, `vault_note_path`, `vault_path` optional) |
-| `POST /api/chat` | Vault RAG chat answer with cited notes |
-| `GET /api/analytics` | Local analyze/apply telemetry summary |
-| `POST /api/reports/export` | Export analysis report as Markdown or HTML |
-| `GET /api/suggestions/checkpoint` | Saved notes for a source key / latest incomplete run |
-| `GET /api/suggestions/checkpoint/export` | Download checkpoint JSON for a source |
-| `POST /api/suggestions/checkpoint/import` | Import checkpoint suggestions (validated paths; admin) |
-| `POST /api/suggestions/preview` | Exact merged note content without writing |
-| `POST /api/suggestions/apply` | One note; `overwrite`, `mode` (`write`/`append`); then incremental re-index |
-| `POST /api/suggestions/apply-batch` | Many notes; per-note results + `index_refresh` |
-| `GET /`, `/static/*` | SPA |
+Capability scopes (`API_TOKEN_CAPABILITIES`): `read`, `analyze`, `write`, `admin`,
+`chat`. Empty grants all. Mapping lives in `app/auth.py` (`required_capabilities`);
+unmapped `/api/*` routes fail closed to `admin`. Obsidian plugin needs at least
+`read,analyze,write` (index / watch / apply / analyze).
+
+| Method & path | Cap | Purpose |
+|---------------|-----|---------|
+| `GET /api/status` | read | Config, index/graph sizes, LLM/embedding info, budgets, `stale_note_count`, `warnings`, `auth_required`, capabilities, plugin health, Obsidian URI flags, `thresholds.calibration_available` |
+| `GET /api/debug/recent-logs` | admin | Recent structured log lines |
+| `POST /api/vault/index` | write | Incremental re-index + graph + `index_meta` (`if_stale` skips when fresh) |
+| `POST /api/vault/watch` | write | Enable/disable debounced index-on-save |
+| `GET /api/vault/note` | read | Read existing note content (append diff preview) |
+| `GET /api/vault/search` | read | Keyword / semantic vault search over indexed chunks |
+| `GET /api/vault/index/export` | admin | Export index metadata / fingerprints |
+| `GET /api/vault/thresholds/calibrate` | read | Suggest novelty thresholds from indexed chunk samples |
+| `POST /api/vault/thresholds` | admin | Persist calibrated novelty thresholds to `.env` |
+| `GET /api/vault/graph` | read | Vis-network JSON (optional highlight) |
+| `POST /api/vault/refresh-notes` | write | Re-embed notes already written on disk |
+| `POST /api/sources/analyze` | analyze | NDJSON: novelty + suggestions (`resume`, `vault_note_path`, `vault_path` optional) |
+| `POST /api/chat` | chat | Vault RAG chat answer with cited notes |
+| `GET /api/analytics` | read | Local analyze/apply telemetry summary |
+| `POST /api/reports/export` | read | Export analysis report as Markdown or HTML |
+| `GET /api/suggestions/checkpoint` | read | Saved notes for a source key / latest incomplete run |
+| `GET /api/suggestions/checkpoint/export` | admin | Download checkpoint JSON for a source |
+| `POST /api/suggestions/checkpoint/import` | admin | Import checkpoint suggestions (validated paths) |
+| `POST /api/suggestions/preview` | write | Exact merged note content without writing |
+| `POST /api/suggestions/apply` | write | One note; `overwrite`, `mode` (`write`/`append`); then incremental re-index |
+| `POST /api/suggestions/apply-batch` | write | Many notes; per-note results + `index_refresh` |
+| `GET /`, `/static/*` | — | SPA |
 
 > CI checks this table via `scripts/architecture_drift.py`: every FastAPI `/api/*`
 > route path must appear above, and curated top-level `app/` modules must appear
@@ -622,8 +640,8 @@ Settings load from `.env` via `app/config.py` (see `.env.example`, generated by
 | LLM | `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, `OLLAMA_BASE_URL` |
 | Budget | `LLM_MAX_CALLS_PER_RUN`, `LLM_MAX_INPUT_CHARS_PER_RUN` |
 | Rate limits | `LLM_MAX_RETRIES`, `LLM_RETRY_*`, `LLM_DISABLE_AFTER_FAILURES` |
-| Auth | `API_TOKEN`, `BIND_HOST` |
-| Local-web security | `ALLOWED_HOSTS`, `ALLOWED_VAULT_ROOTS`, `MAX_UPLOAD_MB`, `MAX_FETCH_MB` |
+| Auth | `API_TOKEN`, `API_TOKEN_CAPABILITIES`, `BIND_HOST` |
+| Local-web security | `ALLOWED_HOSTS`, `ALLOWED_VAULT_ROOTS`, `MAX_UPLOAD_MB`, `MAX_FETCH_MB`, `MAX_PDF_PAGES`, `MAX_SOURCE_CHARS`, `MAX_EPUB_ZIP_MEMBERS`, `MAX_EPUB_MEMBER_BYTES` |
 
 `text_limits.py` holds finer constants (preview lengths, planning excerpts).
 

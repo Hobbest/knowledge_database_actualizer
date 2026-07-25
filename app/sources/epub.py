@@ -6,7 +6,9 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import unquote
 from xml.etree import ElementTree as ET
 
+from app.config import settings
 from app.sources.base import LoadedSource, SourceLoader, SourceLocation, SourceSegment
+from app.sources.limits import truncate_segments_to_char_cap
 from app.sources.text import segments_from_markdown
 
 logger = logging.getLogger(__name__)
@@ -144,7 +146,15 @@ def _iter_spine_documents(
     """Read spine XHTML only, skipping manifest images with broken hrefs."""
     warnings: list[str] = []
     with zipfile.ZipFile(path) as archive:
-        archive_names = set(archive.namelist())
+        names = archive.namelist()
+        max_members = int(getattr(settings, "max_epub_zip_members", 0) or 0)
+        if max_members > 0 and len(names) > max_members:
+            raise ValueError(
+                f"EPUB has {len(names)} ZIP members; max allowed is "
+                f"{max_members} (MAX_EPUB_ZIP_MEMBERS)."
+            )
+        archive_names = set(names)
+        max_member_bytes = int(getattr(settings, "max_epub_member_bytes", 0) or 0)
         try:
             container = archive.read("META-INF/container.xml")
         except KeyError as exc:
@@ -188,6 +198,17 @@ def _iter_spine_documents(
             member = _resolve_epub_member(opf_member, href, archive_names)
             if member is None:
                 warnings.append(f"Skipped unreadable chapter '{href}'.")
+                continue
+            try:
+                info = archive.getinfo(member)
+            except KeyError:
+                warnings.append(f"Skipped unreadable chapter '{href}'.")
+                continue
+            if max_member_bytes > 0 and info.file_size > max_member_bytes:
+                warnings.append(
+                    f"Skipped chapter '{href}' ({info.file_size:,} bytes exceeds "
+                    f"MAX_EPUB_MEMBER_BYTES={max_member_bytes:,})."
+                )
                 continue
             try:
                 documents.append((member, archive.read(member)))
@@ -263,6 +284,13 @@ class EpubLoader(SourceLoader):
 
         if not segments:
             raise ValueError(f"No readable chapter text found in EPUB: {path}")
+
+        segments, char_warning = truncate_segments_to_char_cap(
+            segments,
+            max_chars=int(getattr(settings, "max_source_chars", 0) or 0),
+        )
+        if char_warning:
+            load_warnings.append(char_warning)
 
         content = "\n\n".join(segment.text for segment in segments)
         return LoadedSource(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import secrets
 from time import perf_counter
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
@@ -74,13 +75,41 @@ app.include_router(suggestions_router)
 app.include_router(chat_router)
 
 
-def _host_allowed(host_header: str) -> bool:
+_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _normalize_host(host_header: str) -> str:
     host = host_header.strip().lower()
     if host.startswith("["):  # IPv6 literal, e.g. [::1]:8000
-        host = host.split("]", 1)[0] + "]"
-    else:
-        host = host.split(":", 1)[0]
-    return host in settings.allowed_host_set
+        return host.split("]", 1)[0] + "]"
+    return host.split(":", 1)[0]
+
+
+def _host_allowed(host_header: str) -> bool:
+    return _normalize_host(host_header) in settings.allowed_host_set
+
+
+def _origin_host(origin: str) -> str | None:
+    try:
+        parsed = urlparse(origin)
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return _normalize_host(parsed.netloc)
+
+
+def _origin_matches_request(origin: str, host_header: str) -> bool:
+    """Same-origin check against the request Host (and ALLOWED_HOSTS when set)."""
+    origin_host = _origin_host(origin)
+    if origin_host is None:
+        return False
+    request_host = _normalize_host(host_header)
+    if origin_host == request_host:
+        return True
+    if settings.allowed_host_set and origin_host in settings.allowed_host_set:
+        return True
+    return False
 
 
 @app.middleware("http")
@@ -117,6 +146,48 @@ async def host_allowlist(request, call_next):
             "if you are serving beyond localhost."
         },
     )
+
+
+@app.middleware("http")
+async def mutating_origin_guard(request, call_next):
+    """When API_TOKEN is unset, reject cross-site mutating /api requests.
+
+    Browsers send Sec-Fetch-Site / Origin on form and fetch POSTs. Curl and
+    local tooling without those headers still work. This is not a full CSRF
+    defense once a token is configured — use API_TOKEN for that.
+    """
+    if settings.api_token:
+        return await call_next(request)
+    if request.method.upper() not in _MUTATING_METHODS:
+        return await call_next(request)
+    path = request.url.path
+    if not path.startswith("/api/"):
+        return await call_next(request)
+
+    site = (request.headers.get("sec-fetch-site") or "").strip().lower()
+    if site == "cross-site":
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": (
+                    "Cross-site mutating requests are blocked when API_TOKEN "
+                    "is unset. Set API_TOKEN or call the API same-origin."
+                )
+            },
+        )
+
+    origin = (request.headers.get("origin") or "").strip()
+    if origin and not _origin_matches_request(origin, request.headers.get("host", "")):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": (
+                    "Origin does not match this host. Set API_TOKEN for "
+                    "authenticated cross-origin access, or use same-origin requests."
+                )
+            },
+        )
+    return await call_next(request)
 
 
 def _token_matches(provided: str, expected: str) -> bool:

@@ -5,7 +5,9 @@ from pathlib import Path
 
 import mammoth
 
+from app.config import settings
 from app.sources.base import LoadedSource, SourceLoader, SourceLocation, SourceSegment
+from app.sources.limits import truncate_segments_to_char_cap
 from app.sources.text import segments_from_markdown
 
 logger = logging.getLogger(__name__)
@@ -41,9 +43,17 @@ class DocxLoader(SourceLoader):
                 SourceSegment(text=markdown, location=SourceLocation(), index=0)
             ]
 
+        segments, char_warning = truncate_segments_to_char_cap(
+            segments,
+            max_chars=int(getattr(settings, "max_source_chars", 0) or 0),
+        )
+        if char_warning:
+            load_warnings.append(char_warning)
+
+        content = "\n\n".join(segment.text for segment in segments)
         return LoadedSource(
             title=path.stem,
-            text=markdown,
+            text=content,
             source_type="docx",
             source_ref=str(path),
             segments=segments,

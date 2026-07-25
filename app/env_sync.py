@@ -145,6 +145,18 @@ ENV_SECTIONS: tuple[EnvSection, ...] = (
     ),
     EnvSection(
         header=(
+            "# Soft parser caps for PDF/EPUB/DOCX (0 = unlimited). Truncation is warned, not rejected.",
+            "# EPUB member byte cap applies per ZIP entry before decompress into memory.",
+        ),
+        fields=(
+            "max_pdf_pages",
+            "max_source_chars",
+            "max_epub_zip_members",
+            "max_epub_member_bytes",
+        ),
+    ),
+    EnvSection(
+        header=(
             "# YouTube transcript languages (BCP-47 codes, comma-separated, tried in order).",
             "# When none match, the loader falls back to the first available transcript.",
         ),

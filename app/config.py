@@ -98,6 +98,13 @@ class Settings(BaseSettings):
     # Cap outbound web/HTML fetch bodies (0 = unlimited). Separate from uploads.
     max_fetch_mb: int = 10
 
+    # Soft parser caps for in-process PDF/EPUB/DOCX extraction (0 = unlimited).
+    # Truncation is reported via LoadedSource.load_warnings rather than hard fail.
+    max_pdf_pages: int = 200
+    max_source_chars: int = 2_000_000
+    max_epub_zip_members: int = 5_000
+    max_epub_member_bytes: int = 20_971_520  # 20 MiB per ZIP member
+
     # Comma-separated BCP-47 language codes for YouTube transcripts (tried in
     # order). When none match, the loader falls back to the first available
     # transcript language.
@@ -291,6 +298,14 @@ class Settings(BaseSettings):
             raise ValueError("MAX_UPLOAD_MB must be >= 0 (0 = unlimited)")
         if self.max_fetch_mb < 0:
             raise ValueError("MAX_FETCH_MB must be >= 0 (0 = unlimited)")
+        if self.max_pdf_pages < 0:
+            raise ValueError("MAX_PDF_PAGES must be >= 0 (0 = unlimited)")
+        if self.max_source_chars < 0:
+            raise ValueError("MAX_SOURCE_CHARS must be >= 0 (0 = unlimited)")
+        if self.max_epub_zip_members < 0:
+            raise ValueError("MAX_EPUB_ZIP_MEMBERS must be >= 0 (0 = unlimited)")
+        if self.max_epub_member_bytes < 0:
+            raise ValueError("MAX_EPUB_MEMBER_BYTES must be >= 0 (0 = unlimited)")
         if self.whisper_beam_size < 1:
             raise ValueError("WHISPER_BEAM_SIZE must be >= 1")
         if self.auto_tagging_top_k < 1 or self.auto_tagging_max_tags < 1:

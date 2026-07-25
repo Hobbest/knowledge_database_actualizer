@@ -13,8 +13,12 @@ services:
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1,[::1]}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
       MAX_FETCH_MB: ${MAX_FETCH_MB:-10}
+      # Networked profile: disable entry-point plugins unless an allowlist is set.
+      DISABLE_PLUGIN_DISCOVERY: ${DISABLE_PLUGIN_DISCOVERY:-true}
+      PLUGIN_ALLOWLIST: ${PLUGIN_ALLOWLIST:-}
     volumes:
       - ./data:/data
       # Read-write so Apply / write-to-vault works. Keep backups of important vaults.
       - ${VAULT_PATH:-./sample_vault}:/vault
+    user: "1000:1000"
     restart: unless-stopped

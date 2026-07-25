@@ -16,6 +16,7 @@ from app.sources.base import (
     SourceLocation,
     SourceSegment,
 )
+from app.sources.limits import truncate_segments_to_char_cap
 from app.sources.pdf_quality import assess_pdf_extraction_quality, page_text_is_unreliable
 from app.vision import describe_image
 
@@ -45,8 +46,18 @@ class PdfLoader(SourceLoader):
         except Exception as exc:  # noqa: BLE001 - normalize parser-specific failures
             raise ValueError(f"Invalid or unreadable PDF: {path}") from exc
 
+        load_warnings: list[str] = []
+        pages_to_read = page_count
+        max_pages = int(getattr(settings, "max_pdf_pages", 0) or 0)
+        if max_pages > 0 and page_count > max_pages:
+            pages_to_read = max_pages
+            load_warnings.append(
+                f"PDF has {page_count} pages; only the first {max_pages} were "
+                f"extracted (MAX_PDF_PAGES)."
+            )
+
         page_texts: list[str] = []
-        for page_number, page in enumerate(reader.pages, start=1):
+        for page_number, page in enumerate(reader.pages[:pages_to_read], start=1):
             try:
                 page_texts.append((page.extract_text() or "").strip())
             except Exception as exc:  # noqa: BLE001 - another extractor may recover the page
@@ -65,7 +76,6 @@ class PdfLoader(SourceLoader):
             ):
                 page_texts[index] = fallback_text
 
-        load_warnings: list[str] = []
         ocr_indexes = [
             index for index in sparse_indexes if page_text_is_unreliable(page_texts[index])
         ]
@@ -87,6 +97,13 @@ class PdfLoader(SourceLoader):
 
         if not segments:
             raise ValueError(f"No extractable text found in PDF: {path}")
+
+        segments, char_warning = truncate_segments_to_char_cap(
+            segments,
+            max_chars=int(getattr(settings, "max_source_chars", 0) or 0),
+        )
+        if char_warning:
+            load_warnings.append(char_warning)
 
         if settings.include_media:
             media.extend(self._extract_tables(path))

@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.auth import validate_suggestion_content, validate_suggestion_note_path
+from app.checkpoint import MAX_SUGGESTION_CONTENT_CHARS
+
+# Keep apply-batch bounded so a single request cannot flood the vault writer.
+MAX_APPLY_BATCH_NOTES = 100
 
 
 class VaultIndexRequest(BaseModel):
@@ -37,9 +43,23 @@ class ApplySuggestionRequest(BaseModel):
     append_heading: str | None = None
     source_title: str | None = Field(default=None, max_length=300)
 
+    @field_validator("note_path")
+    @classmethod
+    def _validate_note_path(cls, value: str) -> str:
+        return validate_suggestion_note_path(value)
+
+    @field_validator("content")
+    @classmethod
+    def _validate_content(cls, value: str) -> str:
+        return validate_suggestion_content(value, max_chars=MAX_SUGGESTION_CONTENT_CHARS)
+
 
 class ApplySuggestionsBatchRequest(BaseModel):
-    notes: list[ApplySuggestionRequest]
+    notes: list[ApplySuggestionRequest] = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_APPLY_BATCH_NOTES,
+    )
     vault_path: str | None = None
     source_title: str | None = Field(default=None, max_length=300)
 
