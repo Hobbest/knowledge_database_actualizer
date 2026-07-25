@@ -94,7 +94,7 @@ class Settings(BaseSettings):
     segment_target_chars: int = 1200
 
     # Reject uploads larger than this many megabytes (0 = unlimited).
-    max_upload_mb: int = 50
+    max_upload_mb: int = 100
     # Cap outbound web/HTML fetch bodies (0 = unlimited). Separate from uploads.
     max_fetch_mb: int = 10
 
@@ -182,7 +182,7 @@ class Settings(BaseSettings):
     # Optional LLM "deep read" claims pass before single-note synthesize.
     # Default off: extractive EvidencePack only. Skipped when batch drafting
     # (llm_draft_batch_size > 1), topic is not novel, or budget is low.
-    draft_llm_deep_read: bool = False
+    draft_llm_deep_read: bool = True
 
     # When > 0, inline bounded excerpts from ![[embedded]] notes into embeddings.
     transclude_depth: int = 0
