@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.config import settings
 from app.plugin_api import discover_source_loaders
 from app.source_identity import upload_source_key
 from app.sources.audio import AudioVideoLoader
@@ -15,14 +16,23 @@ from app.sources.youtube import YouTubeLoader
 from app.url_security import validate_public_url
 
 
+def _load_plugin_source_loaders() -> list:
+    """Instantiate entry-point source loaders when plugin discovery is allowed."""
+    if settings.disable_plugin_discovery:
+        return []
+    loaders = []
+    plugins = discover_source_loaders(allowlist=settings.plugin_allowlist_set or None)
+    for plugin in plugins.values():
+        try:
+            loaders.append(plugin() if isinstance(plugin, type) else plugin)
+        except Exception:
+            continue
+    return loaders
+
+
 class SourceDispatcher:
     def __init__(self):
-        plugin_loaders = []
-        for plugin in discover_source_loaders().values():
-            try:
-                plugin_loaders.append(plugin() if isinstance(plugin, type) else plugin)
-            except Exception:
-                continue
+        plugin_loaders = _load_plugin_source_loaders()
         self.path_loaders = [
             *plugin_loaders,
             TextLoader(),

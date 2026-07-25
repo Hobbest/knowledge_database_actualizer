@@ -295,10 +295,11 @@ def _create_llm_provider(config: tuple) -> LLMProvider | None:
         return GeminiProvider(api_key, model)
     if provider in {"ollama", "local"}:
         return OllamaProvider(model, ollama_base_url)
-    plugin = discover_llm_providers().get(provider)
-    if plugin is not None:
-        factory = plugin
-        return factory(model=model, api_key=api_key, settings=settings)
+    if not settings.disable_plugin_discovery:
+        plugins = discover_llm_providers(allowlist=settings.plugin_allowlist_set or None)
+        plugin = plugins.get(provider)
+        if plugin is not None:
+            return plugin(model=model, api_key=api_key, settings=settings)
     raise ValueError(
         f"Unsupported LLM_PROVIDER '{settings.llm_provider}'. "
         "Use openai, anthropic, gemini, ollama (local), or an installed "
